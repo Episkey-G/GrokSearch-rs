@@ -193,8 +193,10 @@ GrokSearch-rs 是一个 Rust MCP 服务器，用于把 Grok 网络搜索和 Tavi
 
 ## Star History
 
-<p align="center">
-  <a href="https://www.star-history.com/?type=date&repos=Episkey-G%2FGrokSearch-rs">
-    <img src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" alt="GrokSearch-rs Star History Chart">
-  </a>
-</p>
+<a href="https://www.star-history.com/?repos=Episkey-G%2FGrokSearch-rs&type=timeline&logscale=&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Episkey-G/GrokSearch-rs&type=timeline&theme=dark&logscale&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Episkey-G/GrokSearch-rs&type=timeline&logscale&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Episkey-G/GrokSearch-rs&type=timeline&logscale&legend=top-left" />
+ </picture>
+</a>
