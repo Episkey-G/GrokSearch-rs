@@ -5,13 +5,13 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 #[derive(Clone)]
-pub struct TavilyProvider {
+pub struct FirecrawlProvider {
     client: Client,
     api_url: String,
     api_key: String,
 }
 
-impl TavilyProvider {
+impl FirecrawlProvider {
     pub fn new(api_url: impl Into<String>, api_key: impl Into<String>, timeout: Duration) -> Self {
         let client = Client::builder()
             .timeout(timeout)
@@ -26,44 +26,27 @@ impl TavilyProvider {
 
     pub async fn search(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
         let raw = self
-            .post_json(
-                "search",
-                json!({
-                    "query": query,
-                    "max_results": max_results,
-                    "include_answer": false
-                }),
-            )
+            .post_json("search", json!({ "query": query, "limit": max_results }))
             .await?;
-        Ok(normalize_tavily_results(&raw))
+        Ok(normalize_firecrawl_results(&raw))
     }
 
-    pub async fn extract(&self, url: &str) -> Result<String> {
+    pub async fn scrape(&self, url: &str) -> Result<String> {
         let raw = self
-            .post_json("extract", json!({ "urls": [url], "format": "markdown" }))
+            .post_json("scrape", json!({ "url": url, "formats": ["markdown"] }))
             .await?;
-        let extracted = raw
-            .get("results")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|item| item.get("raw_content").or_else(|| item.get("content")))
+        let content = raw
+            .get("data")
+            .and_then(|data| data.get("markdown").or_else(|| data.get("content")))
+            .or_else(|| raw.get("markdown"))
+            .or_else(|| raw.get("content"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty());
 
-        extracted.ok_or_else(|| {
-            GrokSearchError::Provider("Tavily extract returned empty content".to_string())
+        content.ok_or_else(|| {
+            GrokSearchError::Provider("Firecrawl scrape returned empty content".to_string())
         })
-    }
-
-    pub async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
-        let raw = self
-            .post_json("map", tavily_map_request_body(url, max_results))
-            .await?;
-        Ok(limit_tavily_results(
-            normalize_tavily_results(&raw),
-            max_results,
-        ))
     }
 
     async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
@@ -75,55 +58,43 @@ impl TavilyProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| GrokSearchError::Provider(format!("Tavily request failed: {err}")))?;
+            .map_err(|err| GrokSearchError::Provider(format!("Firecrawl request failed: {err}")))?;
 
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|err| GrokSearchError::Provider(format!("Tavily body read failed: {err}")))?;
+        let text = response.text().await.map_err(|err| {
+            GrokSearchError::Provider(format!("Firecrawl body read failed: {err}"))
+        })?;
 
         if !status.is_success() {
             return Err(GrokSearchError::Provider(format!(
-                "Tavily returned HTTP {status}: {text}"
+                "Firecrawl returned HTTP {status}: {text}"
             )));
         }
 
         serde_json::from_str(&text)
-            .map_err(|err| GrokSearchError::Parse(format!("invalid Tavily JSON: {err}")))
+            .map_err(|err| GrokSearchError::Parse(format!("invalid Firecrawl JSON: {err}")))
     }
 }
 
-pub fn tavily_map_request_body(url: &str, max_results: usize) -> Value {
-    json!({
-        "url": url,
-        "max_depth": 1,
-        "limit": max_results
-    })
-}
-
-pub fn limit_tavily_results(mut sources: Vec<Source>, max_results: usize) -> Vec<Source> {
-    sources.truncate(max_results);
-    sources
-}
-
-pub fn normalize_tavily_results(raw: &Value) -> Vec<Source> {
-    raw.get("results")
+pub fn normalize_firecrawl_results(raw: &Value) -> Vec<Source> {
+    raw.get("data")
+        .or_else(|| raw.get("results"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|item| {
             if let Some(url) = item.as_str() {
-                return Some(Source::new(url, "tavily"));
+                return Some(Source::new(url, "firecrawl"));
             }
             let url = item.get("url").and_then(Value::as_str)?;
-            let mut source = Source::new(url, "tavily");
+            let mut source = Source::new(url, "firecrawl");
             if let Some(title) = item.get("title").and_then(Value::as_str) {
                 source = source.with_title(title);
             }
             if let Some(description) = item
-                .get("content")
-                .or_else(|| item.get("description"))
+                .get("description")
+                .or_else(|| item.get("markdown"))
+                .or_else(|| item.get("content"))
                 .and_then(Value::as_str)
             {
                 source = source.with_description(description);

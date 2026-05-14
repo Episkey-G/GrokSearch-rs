@@ -4,7 +4,7 @@ use grok_search_rs::logging::redact_json_value;
 fn debug_log_redacts_authorization_and_api_keys() {
     let value = serde_json::json!({
         "Authorization": "Bearer secret-token",
-        "XAI_API_KEY": "xai-secret",
+        "GROK_SEARCH_API_KEY": "grok-secret",
         "tools": [{"type": "web_search"}]
     });
 
@@ -13,5 +13,5 @@ fn debug_log_redacts_authorization_and_api_keys() {
 
     assert!(text.contains("web_search"));
     assert!(!text.contains("secret-token"));
-    assert!(!text.contains("xai-secret"));
+    assert!(!text.contains("grok-secret"));
 }

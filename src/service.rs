@@ -6,19 +6,19 @@ use uuid::Uuid;
 use crate::cache::SourceCache;
 use crate::config::Config;
 use crate::error::{GrokSearchError, Result};
-use crate::model::anthropic::{
-    AnthropicMessage, AnthropicRequest, AnthropicResponse, AnthropicTool, ContentBlock,
+use crate::model::search::{
+    ContentBlock, SearchMessage, SearchRequest, SearchResponse, SearchTool,
 };
 use crate::model::source::{merge_sources, Source};
 use crate::model::tool::{GetSourcesOutput, WebSearchInput, WebSearchOutput};
 use crate::planning::{PlanResult, PlanningEngine};
-use crate::providers::anthropic::AnthropicMessagesProvider;
+use crate::providers::firecrawl::FirecrawlProvider;
+use crate::providers::grok::GrokResponsesProvider;
 use crate::providers::tavily::TavilyProvider;
-use crate::providers::xai::XaiResponsesProvider;
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
-    async fn search(&self, request: &AnthropicRequest) -> Result<AnthropicResponse>;
+    async fn search(&self, request: &SearchRequest) -> Result<SearchResponse>;
 }
 
 #[async_trait]
@@ -29,16 +29,9 @@ pub trait SourceProvider: Send + Sync {
 }
 
 #[async_trait]
-impl AiProvider for AnthropicMessagesProvider {
-    async fn search(&self, request: &AnthropicRequest) -> Result<AnthropicResponse> {
-        AnthropicMessagesProvider::search(self, request).await
-    }
-}
-
-#[async_trait]
-impl AiProvider for XaiResponsesProvider {
-    async fn search(&self, request: &AnthropicRequest) -> Result<AnthropicResponse> {
-        XaiResponsesProvider::search(self, request).await
+impl AiProvider for GrokResponsesProvider {
+    async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
+        GrokResponsesProvider::search(self, request).await
     }
 }
 
@@ -57,40 +50,64 @@ impl SourceProvider for TavilyProvider {
     }
 }
 
+#[async_trait]
+impl SourceProvider for FirecrawlProvider {
+    async fn search_sources(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
+        FirecrawlProvider::search(self, query, max_results).await
+    }
+
+    async fn fetch(&self, url: &str) -> Result<String> {
+        FirecrawlProvider::scrape(self, url).await
+    }
+
+    async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
+        FirecrawlProvider::search(self, url, max_results).await
+    }
+}
+
 #[derive(Clone)]
 pub struct SearchService {
     config: Config,
     ai: Arc<dyn AiProvider>,
     sources: Option<Arc<dyn SourceProvider>>,
+    fallback_sources: Option<Arc<dyn SourceProvider>>,
     cache: Arc<Mutex<SourceCache>>,
     planning: Arc<Mutex<PlanningEngine>>,
 }
 
 impl SearchService {
     pub fn new(config: Config) -> Result<Self> {
-        let ai_key = config
-            .ai_api_key
+        let grok_key = config
+            .grok_api_key
             .clone()
-            .ok_or(GrokSearchError::MissingConfig("AI_API_KEY"))?;
-        let ai: Arc<dyn AiProvider> = match config.provider.as_str() {
-            "anthropic" => Arc::new(AnthropicMessagesProvider::new(
-                config.ai_api_url.clone(),
-                ai_key,
-                config.web_search_enabled,
-                4096,
-            )),
-            "openai" => Arc::new(XaiResponsesProvider::new(
-                config.ai_api_url.clone(),
-                ai_key,
-                config.web_search_enabled,
-                config.x_search_enabled,
-            )),
-            _ => return Err(GrokSearchError::MissingConfig("GROK_SEARCH_RS_PROVIDER")),
-        };
+            .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?;
+        let ai: Arc<dyn AiProvider> = Arc::new(GrokResponsesProvider::new(
+            config.grok_api_url.clone(),
+            grok_key,
+            config.web_search_enabled,
+            config.x_search_enabled,
+            config.timeout,
+        ));
+
         let sources = if config.tavily_enabled {
             config.tavily_api_key.clone().map(|key| {
-                Arc::new(TavilyProvider::new(config.tavily_api_url.clone(), key))
-                    as Arc<dyn SourceProvider>
+                Arc::new(TavilyProvider::new(
+                    config.tavily_api_url.clone(),
+                    key,
+                    config.timeout,
+                )) as Arc<dyn SourceProvider>
+            })
+        } else {
+            None
+        };
+
+        let fallback_sources = if config.firecrawl_enabled {
+            config.firecrawl_api_key.clone().map(|key| {
+                Arc::new(FirecrawlProvider::new(
+                    config.firecrawl_api_url.clone(),
+                    key,
+                    config.timeout,
+                )) as Arc<dyn SourceProvider>
             })
         } else {
             None
@@ -102,12 +119,13 @@ impl SearchService {
             config,
             ai,
             sources,
+            fallback_sources,
         })
     }
 
     pub fn fake_with_sources() -> Self {
         let config = Config::from_env_map([
-            ("XAI_API_KEY", "fake-xai"),
+            ("GROK_SEARCH_API_KEY", "fake-grok"),
             ("TAVILY_API_KEY", "fake-tavily"),
         ]);
         Self {
@@ -116,6 +134,7 @@ impl SearchService {
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(Arc::new(FakeSourceProvider)),
+            fallback_sources: None,
         }
     }
 
@@ -129,10 +148,7 @@ impl SearchService {
         V: Into<String>,
     {
         let mut vars = vec![
-            (
-                "ANTHROPIC_API_KEY".to_string(),
-                "fake-anthropic".to_string(),
-            ),
+            ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
             ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
         ];
         vars.extend(
@@ -148,6 +164,7 @@ impl SearchService {
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(sources),
+            fallback_sources: None,
         }
     }
 
@@ -162,10 +179,7 @@ impl SearchService {
         V: Into<String>,
     {
         let mut vars = vec![
-            (
-                "ANTHROPIC_API_KEY".to_string(),
-                "fake-anthropic".to_string(),
-            ),
+            ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
             ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
         ];
         vars.extend(
@@ -181,6 +195,42 @@ impl SearchService {
             config,
             ai,
             sources: Some(sources),
+            fallback_sources: None,
+        }
+    }
+
+    pub fn fake_with_primary_and_fallback_sources<I, K, V>(
+        primary: Arc<dyn SourceProvider>,
+        fallback: Arc<dyn SourceProvider>,
+        overrides: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut vars = vec![
+            ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
+            ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
+            (
+                "FIRECRAWL_API_KEY".to_string(),
+                "fake-firecrawl".to_string(),
+            ),
+        ];
+        vars.extend(
+            overrides
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        let config = Config::from_env_map(vars);
+
+        Self {
+            cache: Arc::new(Mutex::new(SourceCache::new(256))),
+            planning: Arc::new(Mutex::new(PlanningEngine::default())),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            sources: Some(primary),
+            fallback_sources: Some(fallback),
         }
     }
 
@@ -190,14 +240,14 @@ impl SearchService {
             .extra_sources
             .unwrap_or(self.config.default_extra_sources);
 
-        let request = self.build_anthropic_request(&input, &[]);
+        let request = self.build_search_request(&input, &[]);
         let response = match self.ai.search(&request).await {
             Ok(response) => response,
             Err(_) => {
                 return self
-                    .web_search_tavily_fallback(
+                    .web_search_source_fallback(
                         session_id,
-                        AnthropicResponse {
+                        SearchResponse {
                             content: String::new(),
                             sources: Vec::new(),
                         },
@@ -210,16 +260,14 @@ impl SearchService {
 
         if let Some(reason) = grok_unverifiable_reason(&response) {
             return self
-                .web_search_tavily_fallback(session_id, response, &input, reason)
+                .web_search_source_fallback(session_id, response, &input, reason)
                 .await;
         }
 
-        let tavily_sources = with_provider(
-            self.search_tavily_sources(&input.query, effective_extra_sources)
-                .await,
-            "tavily_enrichment",
-        );
-        let merged = merge_sources(response.sources, tavily_sources);
+        let extra_sources = self
+            .search_extra_sources(&input.query, effective_extra_sources, "tavily_enrichment")
+            .await;
+        let merged = merge_sources(response.sources, extra_sources);
         let sources_count = merged.len();
         self.cache
             .lock()
@@ -230,38 +278,59 @@ impl SearchService {
             session_id,
             content: response.content,
             sources_count,
-            search_provider: "grok".to_string(),
+            search_provider: "grok_responses".to_string(),
             fallback_used: false,
             fallback_reason: None,
         })
     }
 
-    async fn search_tavily_sources(&self, query: &str, count: usize) -> Vec<Source> {
+    async fn search_extra_sources(
+        &self,
+        query: &str,
+        count: usize,
+        primary_provider: &str,
+    ) -> Vec<Source> {
         if count == 0 {
             return Vec::new();
         }
 
-        match &self.sources {
-            Some(provider) => provider
+        if let Some(provider) = &self.sources {
+            let sources = provider
                 .search_sources(query, count)
                 .await
-                .unwrap_or_default(),
-            None => Vec::new(),
+                .unwrap_or_default();
+            if !sources.is_empty() {
+                return with_provider(sources, primary_provider);
+            }
         }
+
+        if let Some(provider) = &self.fallback_sources {
+            let sources = provider
+                .search_sources(query, count)
+                .await
+                .unwrap_or_default();
+            if !sources.is_empty() {
+                return with_provider(sources, "firecrawl_enrichment");
+            }
+        }
+
+        Vec::new()
     }
 
-    async fn web_search_tavily_fallback(
+    async fn web_search_source_fallback(
         &self,
         session_id: String,
-        response: AnthropicResponse,
+        response: SearchResponse,
         input: &WebSearchInput,
         reason: &str,
     ) -> Result<WebSearchOutput> {
-        let fallback_sources = with_provider(
-            self.search_tavily_sources(&input.query, self.config.fallback_sources)
-                .await,
-            "tavily_fallback",
-        );
+        let fallback_sources = self
+            .search_extra_sources(
+                &input.query,
+                self.config.fallback_sources,
+                "tavily_fallback",
+            )
+            .await;
         let sources_count = fallback_sources.len();
         self.cache
             .lock()
@@ -270,11 +339,11 @@ impl SearchService {
 
         let content = if response.content.trim().is_empty() {
             format!(
-                "Grok search did not return a verifiable answer. Tavily fallback returned {sources_count} source(s)."
+                "Grok Responses search did not return a verifiable answer. Source fallback returned {sources_count} source(s)."
             )
         } else {
             format!(
-                "Grok returned an answer without verifiable search sources, so Tavily fallback returned {sources_count} source(s). Original Grok answer was not treated as verified."
+                "Grok Responses returned an answer without verifiable search sources, so source fallback returned {sources_count} source(s). Original Grok answer was not treated as verified."
             )
         };
 
@@ -282,7 +351,7 @@ impl SearchService {
             session_id,
             content,
             sources_count,
-            search_provider: "tavily_fallback".to_string(),
+            search_provider: "source_fallback".to_string(),
             fallback_used: true,
             fallback_reason: Some(reason.to_string()),
         })
@@ -303,11 +372,21 @@ impl SearchService {
     }
 
     pub async fn web_fetch(&self, url: &str) -> Result<String> {
-        self.sources
-            .as_ref()
-            .ok_or(GrokSearchError::MissingConfig("TAVILY_API_KEY"))?
-            .fetch(url)
-            .await
+        if let Some(provider) = &self.sources {
+            if let Ok(content) = provider.fetch(url).await {
+                if !content.trim().is_empty() {
+                    return Ok(content);
+                }
+            }
+        }
+
+        if let Some(provider) = &self.fallback_sources {
+            return provider.fetch(url).await;
+        }
+
+        Err(GrokSearchError::MissingConfig(
+            "TAVILY_API_KEY or FIRECRAWL_API_KEY",
+        ))
     }
 
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
@@ -324,16 +403,19 @@ impl SearchService {
 
     pub fn get_config_info(&self) -> serde_json::Value {
         serde_json::json!({
-            "provider": self.config.provider,
-            "ai_api_url": self.config.ai_api_url,
-            "ai_model": self.config.ai_model,
+            "provider": "grok_responses",
+            "grok_api_url": self.config.grok_api_url,
+            "grok_model": self.config.grok_model,
             "web_search_enabled": self.config.web_search_enabled,
             "x_search_enabled": self.config.x_search_enabled,
             "tavily_api_url": self.config.tavily_api_url,
             "tavily_enabled": self.config.tavily_enabled,
+            "firecrawl_api_url": self.config.firecrawl_api_url,
+            "firecrawl_enabled": self.config.firecrawl_enabled,
             "default_extra_sources": self.config.default_extra_sources,
             "fallback_sources": self.config.fallback_sources,
             "cache_size": self.config.cache_size,
+            "timeout_seconds": self.config.timeout.as_secs(),
             "redacted": self.config.redacted_diagnostics()
         })
     }
@@ -465,19 +547,19 @@ impl SearchService {
             )
     }
 
-    fn build_anthropic_request(
+    fn build_search_request(
         &self,
         input: &WebSearchInput,
-        tavily_sources: &[Source],
-    ) -> AnthropicRequest {
+        extra_sources: &[Source],
+    ) -> SearchRequest {
         let mut content = input.query.clone();
         if let Some(platform) = input.platform.as_deref().filter(|value| !value.is_empty()) {
             content.push_str("\n\nFocus platform: ");
             content.push_str(platform);
         }
-        if !tavily_sources.is_empty() {
-            content.push_str("\n\nAdditional Tavily sources:\n");
-            for source in tavily_sources {
+        if !extra_sources.is_empty() {
+            content.push_str("\n\nAdditional sources:\n");
+            for source in extra_sources {
                 content.push_str("- ");
                 content.push_str(&source.url);
                 if let Some(title) = &source.title {
@@ -488,22 +570,22 @@ impl SearchService {
             }
         }
 
-        AnthropicRequest {
+        SearchRequest {
             model: input
                 .model
                 .clone()
-                .unwrap_or_else(|| self.config.ai_model.clone()),
-            system: Some("You are a careful web research assistant. Use web search and cite verifiable sources.".to_string()),
-            messages: vec![AnthropicMessage {
+                .unwrap_or_else(|| self.config.grok_model.clone()),
+            system: Some("Answer concisely with factual claims grounded in web search sources. Prefer primary sources. If sources are weak or unavailable, say so.".to_string()),
+            messages: vec![SearchMessage {
                 role: "user".to_string(),
                 content: vec![ContentBlock::text(content)],
             }],
-            tools: vec![AnthropicTool::web_search()],
+            tools: vec![SearchTool::web_search()],
         }
     }
 }
 
-fn grok_unverifiable_reason(response: &AnthropicResponse) -> Option<&'static str> {
+fn grok_unverifiable_reason(response: &SearchResponse) -> Option<&'static str> {
     if response.content.trim().is_empty() {
         return Some("grok_content_empty");
     }
@@ -524,12 +606,11 @@ struct FakeAiProvider;
 
 #[async_trait]
 impl AiProvider for FakeAiProvider {
-    async fn search(&self, _request: &AnthropicRequest) -> Result<AnthropicResponse> {
-        Ok(AnthropicResponse {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Ok(SearchResponse {
             content: "OpenAI published a verifiable update.".to_string(),
             sources: vec![
-                Source::new("https://openai.com/news", "anthropic_web_search")
-                    .with_title("OpenAI News"),
+                Source::new("https://openai.com/news", "grok_responses").with_title("OpenAI News")
             ],
         })
     }

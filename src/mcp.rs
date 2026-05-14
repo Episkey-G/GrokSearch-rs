@@ -347,7 +347,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "web_search",
-                "description": "Search with Anthropic Messages web_search_20250305 tool and optional Tavily extra sources.",
+                "description": "Search with Grok Responses /v1/responses. web_search is enabled by default; x_search is controlled by GROK_SEARCH_X_SEARCH. Tavily and Firecrawl may enrich or fallback sources.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["query"],
@@ -358,7 +358,7 @@ fn tools_list() -> Value {
                         "extra_sources": {
                             "type": "integer",
                             "minimum": 0,
-                            "description": "Optional Tavily enrichment source count. If omitted, GROK_SEARCH_RS_EXTRA_SOURCES is used. This is separate from automatic Tavily fallback."
+                            "description": "Optional supplemental source count. Tavily is primary; Firecrawl is fallback. If omitted, GROK_SEARCH_EXTRA_SOURCES is used."
                         }
                     }
                 }
@@ -376,7 +376,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "web_fetch",
-                "description": "Fetch one page through Tavily Extract.",
+                "description": "Fetch one page through Tavily Extract, with Firecrawl scrape fallback when configured.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["url"],
@@ -387,7 +387,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "web_map",
-                "description": "Map/discover URLs through Tavily.",
+                "description": "Map/discover URLs through Tavily Map.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["url"],

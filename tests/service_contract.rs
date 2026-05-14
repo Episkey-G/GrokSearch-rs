@@ -1,10 +1,23 @@
 use async_trait::async_trait;
 use grok_search_rs::error::Result;
-use grok_search_rs::model::anthropic::{AnthropicRequest, AnthropicResponse};
+use grok_search_rs::model::search::{SearchRequest, SearchResponse};
 use grok_search_rs::model::source::Source;
 use grok_search_rs::model::tool::WebSearchInput;
 use grok_search_rs::service::{AiProvider, SearchService, SourceProvider};
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn service_requires_grok_search_api_key() {
+    let cfg = grok_search_rs::config::Config::from_env_map([] as [(&str, &str); 0]);
+    let result = SearchService::new(cfg);
+
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("GROK_SEARCH_API_KEY"));
+}
 
 #[tokio::test]
 async fn web_search_returns_content_and_caches_sources() {
@@ -22,7 +35,7 @@ async fn web_search_returns_content_and_caches_sources() {
 
     assert!(!output.content.is_empty());
     assert!(output.sources_count > 0);
-    assert_eq!(output.search_provider, "grok");
+    assert_eq!(output.search_provider, "grok_responses");
     assert!(!output.fallback_used);
     assert_eq!(output.fallback_reason, None);
 
@@ -60,8 +73,8 @@ struct EmptySourcesAiProvider;
 
 #[async_trait]
 impl AiProvider for EmptySourcesAiProvider {
-    async fn search(&self, _request: &AnthropicRequest) -> Result<AnthropicResponse> {
-        Ok(AnthropicResponse {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Ok(SearchResponse {
             content: "This answer has no verifiable sources.".to_string(),
             sources: Vec::new(),
         })
@@ -74,7 +87,7 @@ async fn web_search_uses_env_default_extra_sources_after_grok_success() {
     let search_calls = source_provider.search_calls.clone();
     let service = SearchService::fake_with_custom_sources_and_config(
         Arc::new(source_provider),
-        [("GROK_SEARCH_RS_EXTRA_SOURCES", "2")],
+        [("GROK_SEARCH_EXTRA_SOURCES", "2")],
     );
 
     let output = service
@@ -87,7 +100,7 @@ async fn web_search_uses_env_default_extra_sources_after_grok_success() {
         .await
         .expect("search output");
 
-    assert_eq!(output.search_provider, "grok");
+    assert_eq!(output.search_provider, "grok_responses");
     assert!(!output.fallback_used);
     assert_eq!(*search_calls.lock().expect("search call lock"), 1);
     assert_eq!(output.sources_count, 3);
@@ -100,7 +113,7 @@ async fn web_search_uses_env_default_extra_sources_after_grok_success() {
     assert!(cached
         .sources
         .iter()
-        .any(|source| source.provider == "anthropic_web_search"));
+        .any(|source| source.provider == "grok_responses"));
     assert!(cached
         .sources
         .iter()
@@ -114,7 +127,7 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
     let service = SearchService::fake_with_ai_and_sources(
         Arc::new(EmptySourcesAiProvider),
         Arc::new(source_provider),
-        [("GROK_SEARCH_RS_FALLBACK_SOURCES", "4")],
+        [("GROK_SEARCH_FALLBACK_SOURCES", "4")],
     );
 
     let output = service
@@ -127,7 +140,7 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
         .await
         .expect("fallback output");
 
-    assert_eq!(output.search_provider, "tavily_fallback");
+    assert_eq!(output.search_provider, "source_fallback");
     assert!(output.fallback_used);
     assert_eq!(
         output.fallback_reason,
@@ -145,4 +158,62 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
         .sources
         .iter()
         .all(|source| source.provider == "tavily_fallback"));
+}
+
+struct FailingSourceProvider;
+
+#[async_trait]
+impl SourceProvider for FailingSourceProvider {
+    async fn search_sources(&self, _query: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Err(grok_search_rs::error::GrokSearchError::Provider(
+            "source failed".to_string(),
+        ))
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<String> {
+        Err(grok_search_rs::error::GrokSearchError::Provider(
+            "fetch failed".to_string(),
+        ))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Err(grok_search_rs::error::GrokSearchError::Provider(
+            "map failed".to_string(),
+        ))
+    }
+}
+
+struct FirecrawlLikeSourceProvider;
+
+#[async_trait]
+impl SourceProvider for FirecrawlLikeSourceProvider {
+    async fn search_sources(&self, _query: &str, max_results: usize) -> Result<Vec<Source>> {
+        Ok((0..max_results)
+            .map(|idx| Source::new(format!("https://firecrawl.example/{idx}"), "firecrawl"))
+            .collect())
+    }
+
+    async fn fetch(&self, url: &str) -> Result<String> {
+        Ok(format!("firecrawl fallback content for {url}"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn web_fetch_uses_firecrawl_when_tavily_fetch_fails() {
+    let service = SearchService::fake_with_primary_and_fallback_sources(
+        Arc::new(FailingSourceProvider),
+        Arc::new(FirecrawlLikeSourceProvider),
+        [] as [(&str, &str); 0],
+    );
+
+    let content = service
+        .web_fetch("https://example.com/article")
+        .await
+        .expect("fetch output");
+
+    assert!(content.contains("firecrawl fallback content"));
 }

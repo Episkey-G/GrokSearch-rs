@@ -15,7 +15,7 @@ cargo test
 | Area | Command |
 |---|---|
 | Config parsing | `cargo test --test config` |
-| Provider payload adapters | `cargo test --test adapter_anthropic` |
+| Grok Responses payload and response adapters | `cargo test --test adapter_grok_responses` |
 | Search orchestration | `cargo test --test service_contract` |
 | Tavily parsing | `cargo test --test tavily_parse` |
 | Built-in tool toggles | `cargo test --test toggle_builtin_tools` |
@@ -28,11 +28,11 @@ Live provider tests require real API keys and should not be committed as logs.
 
 Recommended smoke matrix:
 
-1. `GROK_SEARCH_RS_PROVIDER=anthropic` with `/messages` and `GROK_SEARCH_RS_WEB_SEARCH=true`.
-2. `GROK_SEARCH_RS_PROVIDER=openai` with `/responses` and `GROK_SEARCH_RS_X_SEARCH=false`.
-3. `GROK_SEARCH_RS_PROVIDER=openai` with `/responses` and `GROK_SEARCH_RS_X_SEARCH=true` only when the gateway is known to preserve `x_search`.
-4. Tavily fallback by forcing an empty or source-less AI provider response.
-5. `web_fetch` against a stable public URL.
+1. `GROK_SEARCH_URL=https://api.x.ai` or another compatible gateway root URL.
+2. `GROK_SEARCH_X_SEARCH=false` for baseline Responses `web_search` only.
+3. `GROK_SEARCH_X_SEARCH=true` only when the gateway is known to preserve `x_search`.
+4. Tavily fallback by forcing an empty or source-less Grok response in tests.
+5. `web_fetch` against a stable public URL, first with Tavily, then with Firecrawl fallback.
 6. `web_map` with a small `max_results` value.
 
 Store live logs under `logs/`; the directory is ignored by git.

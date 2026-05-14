@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicRequest {
+pub struct SearchRequest {
     pub model: String,
     pub system: Option<String>,
-    pub messages: Vec<AnthropicMessage>,
-    pub tools: Vec<AnthropicTool>,
+    pub messages: Vec<SearchMessage>,
+    pub tools: Vec<SearchTool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicMessage {
+pub struct SearchMessage {
     pub role: String,
     pub content: Vec<ContentBlock>,
 }
@@ -35,12 +35,12 @@ impl ContentBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicTool {
+pub struct SearchTool {
     pub name: String,
     pub input_schema: Value,
 }
 
-impl AnthropicTool {
+impl SearchTool {
     pub fn web_search() -> Self {
         Self {
             name: "web_search".to_string(),
@@ -53,7 +53,7 @@ impl AnthropicTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicResponse {
+pub struct SearchResponse {
     pub content: String,
     pub sources: Vec<crate::model::source::Source>,
 }
