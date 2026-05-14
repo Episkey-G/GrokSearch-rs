@@ -1,0 +1,18 @@
+/target/
+/tmp/
+/logs/
+/.ace-tool/
+
+# Local MCP/client state
+.claude/
+.codex/
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Local environment files
+.env
+.env.*
+!.env.example

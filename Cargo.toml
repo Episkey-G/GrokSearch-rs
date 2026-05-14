@@ -1,0 +1,33 @@
+[package]
+name = "grok-search-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+description = "Rust MCP server for Grok web search and Tavily-backed source retrieval"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/your-org/grok-search-rs"
+homepage = "https://github.com/your-org/grok-search-rs"
+keywords = ["mcp", "grok", "tavily", "search", "anthropic"]
+categories = ["command-line-utilities", "web-programming"]
+
+[lib]
+name = "grok_search_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grok-search-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
