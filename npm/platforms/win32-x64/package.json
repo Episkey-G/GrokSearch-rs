@@ -1,6 +1,6 @@
 {
   "name": "@epsiekygrr_zedxx/grok-search-rs-win32-x64",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Windows x64 binary for grok-search-rs",
   "license": "MIT",
   "repository": {
