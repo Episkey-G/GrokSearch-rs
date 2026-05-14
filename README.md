@@ -2,11 +2,6 @@
 
 ![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
 
-<p align="center">
-  <a href="https://www.star-history.com/#Episkey-G/GrokSearch-rs&Date">
-    <img src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" alt="GrokSearch-rs Star History Chart">
-  </a>
-</p>
 
 English | [简体中文](#简体中文)
 
@@ -195,3 +190,11 @@ GrokSearch-rs 是一个 Rust MCP 服务器，用于把 Grok 网络搜索和 Tavi
 - Grok 无内容、无可信来源或 provider 报错时，`web_search` 使用 Tavily 兜底。
 - `GROK_SEARCH_RS_PROVIDER` 填 `anthropic` 就走 `/messages`，填 `openai` 就走 `/responses`。
 - `web_search` 默认开启，`x_search` 默认关闭，需要 `GROK_SEARCH_RS_X_SEARCH=true` 才启用。
+
+## Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/?type=date&repos=Episkey-G%2FGrokSearch-rs">
+    <img src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" alt="GrokSearch-rs Star History Chart">
+  </a>
+</p>
