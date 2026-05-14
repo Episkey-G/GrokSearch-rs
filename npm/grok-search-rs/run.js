@@ -22,35 +22,35 @@ function platformInfo() {
   const arch = process.arch;
   if (platform === "darwin" && (arch === "x64" || arch === "arm64")) {
     return {
-      packageName: "@grok-search-rs/darwin-universal",
+      packageName: "@epsiekygrr_zedxx/grok-search-rs-darwin-universal",
       assetName: "grok-search-rs_Darwin_universal.tar.gz",
       binaryName: "grok-search-rs",
     };
   }
   if (platform === "linux" && arch === "x64") {
     return {
-      packageName: "@grok-search-rs/linux-x64",
+      packageName: "@epsiekygrr_zedxx/grok-search-rs-linux-x64",
       assetName: "grok-search-rs_Linux_x86_64.tar.gz",
       binaryName: "grok-search-rs",
     };
   }
   if (platform === "linux" && arch === "arm64") {
     return {
-      packageName: "@grok-search-rs/linux-arm64",
+      packageName: "@epsiekygrr_zedxx/grok-search-rs-linux-arm64",
       assetName: "grok-search-rs_Linux_aarch64.tar.gz",
       binaryName: "grok-search-rs",
     };
   }
   if (platform === "win32" && arch === "x64") {
     return {
-      packageName: "@grok-search-rs/win32-x64",
+      packageName: "@epsiekygrr_zedxx/grok-search-rs-win32-x64",
       assetName: "grok-search-rs_Windows_x86_64.zip",
       binaryName: "grok-search-rs.exe",
     };
   }
   if (platform === "win32" && arch === "arm64") {
     return {
-      packageName: "@grok-search-rs/win32-arm64",
+      packageName: "@epsiekygrr_zedxx/grok-search-rs-win32-arm64",
       assetName: "grok-search-rs_Windows_aarch64.zip",
       binaryName: "grok-search-rs.exe",
     };
