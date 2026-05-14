@@ -16,3 +16,7 @@
 .env
 .env.*
 !.env.example
+
+# Agent planning scratch files
+/docs/superpowers/
+/GrokSearch-rs-rebuild-plan.md
