@@ -1,0 +1,15 @@
+{
+  "name": "@grok-search-rs/linux-arm64",
+  "version": "0.1.0",
+  "description": "Linux arm64 binary for grok-search-rs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Episkey-G/GrokSearch-rs.git"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin/grok-search-rs"],
+  "preferUnplugged": true,
+  "publishConfig": { "access": "public" }
+}

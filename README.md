@@ -15,18 +15,36 @@ web_map    -> Tavily Map
 
 `web_search` is for concise sourced summaries. Use `get_sources` before source-specific claims, citation lists, or follow-up fetches. Use `web_fetch` only for exact page evidence, quotes, technical details, or when the summary is insufficient.
 
-## Install
+## Quick Start
+
+Use with Claude Code via `npx`:
+
+```bash
+claude mcp add-json grok-search-rs --scope user '{
+  "type": "stdio",
+  "command": "npx",
+  "args": ["grok-search-rs"],
+  "env": {
+    "GROK_SEARCH_API_KEY": "your-grok-compatible-key",
+    "GROK_SEARCH_URL": "https://api.x.ai",
+    "GROK_SEARCH_MODEL": "grok-4.3",
+    "TAVILY_API_KEY": "your-tavily-key"
+  }
+}'
+```
+
+Or run directly:
+
+```bash
+npx grok-search-rs
+```
+
+## Build from source
 
 ```bash
 git clone https://github.com/Episkey-G/GrokSearch-rs.git
 cd GrokSearch-rs
 cargo build --release
-```
-
-Binary:
-
-```text
-target/release/grok-search-rs
 ```
 
 ## Configuration
@@ -60,7 +78,7 @@ FIRECRAWL_API_URL=https://api.firecrawl.dev
 
 `GROK_SEARCH_URL` can be a root URL or `/v1` URL. The server automatically calls `/v1/responses`.
 
-## MCP config example
+## MCP config example for local binary
 
 ```json
 {

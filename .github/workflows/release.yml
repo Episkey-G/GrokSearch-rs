@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-release:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: grok-search-rs
+            asset_name: grok-search-rs_Linux_x86_64.tar.gz
+            universal: false
+            cross: false
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: grok-search-rs
+            asset_name: grok-search-rs_Linux_aarch64.tar.gz
+            universal: false
+            cross: true
+          - target: universal-apple-darwin
+            os: macos-latest
+            artifact_name: grok-search-rs
+            asset_name: grok-search-rs_Darwin_universal.tar.gz
+            universal: true
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: grok-search-rs.exe
+            asset_name: grok-search-rs_Windows_x86_64.zip
+            universal: false
+            cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: grok-search-rs.exe
+            asset_name: grok-search-rs_Windows_aarch64.zip
+            universal: false
+            cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (Universal macOS)
+        if: matrix.universal == true
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Setup Rust
+        if: matrix.universal != true
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross == true
+        uses: taiki-e/install-action@cross
+
+      - name: Build with cross
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --locked
+
+      - name: Build universal macOS
+        if: matrix.universal == true
+        run: |
+          cargo build --release --target x86_64-apple-darwin --locked
+          cargo build --release --target aarch64-apple-darwin --locked
+          lipo -create -output target/release/${{ matrix.artifact_name }} \
+            target/x86_64-apple-darwin/release/${{ matrix.artifact_name }} \
+            target/aarch64-apple-darwin/release/${{ matrix.artifact_name }}
+
+      - name: Build
+        if: matrix.universal != true && matrix.cross != true
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Package Unix
+        if: matrix.os != 'windows-latest'
+        run: |
+          if [ "${{ matrix.universal }}" = "true" ]; then
+            cd target/release
+            tar czf ../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          elif [ "${{ matrix.cross }}" = "true" ]; then
+            cd target/${{ matrix.target }}/release
+            tar czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          else
+            cd target/${{ matrix.target }}/release
+            tar czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          fi
+
+      - name: Package Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ../../../${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts and checksums
+        run: |
+          cd artifacts
+          mkdir -p ../flat
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} ../flat/ \;
+          cd ../flat
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+
+      - name: Generate changelog
+        run: |
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -A1 "^${CURRENT_TAG}$" | tail -n1 || true)
+          echo "## What's Changed" > changelog.md
+          echo "" >> changelog.md
+          if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "$CURRENT_TAG" ]; then
+            git log ${PREVIOUS_TAG}..${CURRENT_TAG} --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+            echo "" >> changelog.md
+            echo "" >> changelog.md
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}" >> changelog.md
+          else
+            git log --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: changelog.md
+          files: |
+            flat/*.tar.gz
+            flat/*.zip
+            flat/SHA256SUMS
+
+  publish-npm-platforms:
+    name: Publish ${{ matrix.platform }} to npm
+    needs: create-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: linux-x64
+            asset: grok-search-rs_Linux_x86_64.tar.gz
+            binary: grok-search-rs
+          - platform: linux-arm64
+            asset: grok-search-rs_Linux_aarch64.tar.gz
+            binary: grok-search-rs
+          - platform: darwin-universal
+            asset: grok-search-rs_Darwin_universal.tar.gz
+            binary: grok-search-rs
+          - platform: win32-x64
+            asset: grok-search-rs_Windows_x86_64.zip
+            binary: grok-search-rs.exe
+          - platform: win32-arm64
+            asset: grok-search-rs_Windows_aarch64.zip
+            binary: grok-search-rs.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: .
+
+      - name: Prepare platform package
+        shell: bash
+        run: |
+          cd npm/platforms/${{ matrix.platform }}
+          mkdir -p bin
+          if [[ "${{ matrix.asset }}" == *.zip ]]; then
+            unzip ../../../${{ matrix.asset }} -d bin/
+          else
+            tar -xzf ../../../${{ matrix.asset }} -C bin/
+          fi
+          if [[ "${{ matrix.binary }}" != *.exe ]]; then
+            chmod +x bin/${{ matrix.binary }}
+          fi
+          VERSION=${GITHUB_REF#refs/tags/v}
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Publish platform package
+        run: npm publish --access public --provenance
+        working-directory: npm/platforms/${{ matrix.platform }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-npm:
+    name: Publish main npm package
+    needs: publish-npm-platforms
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync npm versions
+        run: |
+          cd npm/grok-search-rs
+          VERSION=${GITHUB_REF#refs/tags/v}
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          VERSION=${GITHUB_REF#refs/tags/v}
+          export VERSION
+          node - <<'NODE'
+          const fs = require('fs');
+          const pkg = require('./package.json');
+          const version = process.env.VERSION;
+          for (const dep of Object.keys(pkg.optionalDependencies || {})) {
+            pkg.optionalDependencies[dep] = version;
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+        env:
+          VERSION: ${{ github.ref_name }}
+
+      - name: Publish main package
+        run: npm publish --access public --provenance
+        working-directory: npm/grok-search-rs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

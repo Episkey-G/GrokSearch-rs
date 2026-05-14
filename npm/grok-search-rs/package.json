@@ -1,0 +1,54 @@
+{
+  "name": "grok-search-rs",
+  "version": "0.1.0",
+  "description": "Rust MCP server for Grok Responses web search, Tavily fetch/map, and Firecrawl fallback",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Episkey-G/GrokSearch-rs.git"
+  },
+  "author": "Episkey-G",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Episkey-G/GrokSearch-rs/issues"
+  },
+  "homepage": "https://github.com/Episkey-G/GrokSearch-rs#readme",
+  "keywords": [
+    "mcp",
+    "grok",
+    "xai",
+    "tavily",
+    "firecrawl",
+    "search",
+    "rust",
+    "cli"
+  ],
+  "bin": {
+    "grok-search-rs": "run.js"
+  },
+  "files": [
+    "run.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=14.14.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "optionalDependencies": {
+    "@grok-search-rs/darwin-universal": "0.1.0",
+    "@grok-search-rs/linux-x64": "0.1.0",
+    "@grok-search-rs/linux-arm64": "0.1.0",
+    "@grok-search-rs/win32-x64": "0.1.0",
+    "@grok-search-rs/win32-arm64": "0.1.0"
+  }
+}
