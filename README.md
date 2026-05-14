@@ -3,7 +3,9 @@
 ![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
 
 <p align="center">
-  <img src="assets/star-history.png" alt="GrokSearch-rs star history" width="820">
+  <a href="https://www.star-history.com/#Episkey-G/GrokSearch-rs&Date">
+    <img src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" alt="GrokSearch-rs Star History Chart">
+  </a>
 </p>
 
 English | [简体中文](#简体中文)
