@@ -1,5 +1,11 @@
 # GrokSearch-rs
 
+![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
+
+<p align="center">
+  <img src="assets/star-history.png" alt="GrokSearch-rs star history" width="820">
+</p>
+
 English | [简体中文](#简体中文)
 
 GrokSearch-rs is a Rust MCP server for Grok-backed web search and Tavily-backed source retrieval. It is a Rust rewrite inspired by [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch), with a smaller runtime footprint and explicit provider adapters.
