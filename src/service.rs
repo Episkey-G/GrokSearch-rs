@@ -258,7 +258,7 @@ impl SearchService {
         query: &str,
         count: usize,
         filters: &SearchFilters,
-        primary_provider: &str,
+        primary_provider: &'static str,
     ) -> Vec<Source> {
         if count == 0 {
             return Vec::new();
@@ -527,9 +527,13 @@ fn apply_fetch_limit(url: &str, content: String, max_chars: Option<usize>) -> We
     }
 }
 
-fn with_provider(mut sources: Vec<Source>, provider: &str) -> Vec<Source> {
+fn with_provider(
+    mut sources: Vec<Source>,
+    provider: impl Into<std::borrow::Cow<'static, str>>,
+) -> Vec<Source> {
+    let provider = provider.into();
     for source in &mut sources {
-        source.provider = provider.to_string();
+        source.provider = provider.clone();
     }
     sources
 }

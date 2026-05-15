@@ -13,3 +13,11 @@ fn merge_sources_dedupes_by_url_and_preserves_first_provider() {
     assert_eq!(merged[0].title.as_deref(), Some("OpenAI News"));
     assert_eq!(merged[1].url, "https://example.com/a");
 }
+
+#[test]
+fn source_provider_field_accepts_static_str_via_cow() {
+    let source = Source::new("https://example.com", "tavily");
+    // Pin the contract: Cow<'static, str> compares equal to &str literals so
+    // downstream assertions like `source.provider == "tavily"` keep working.
+    assert_eq!(source.provider, "tavily");
+}

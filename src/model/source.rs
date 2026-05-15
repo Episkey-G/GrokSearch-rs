@@ -1,17 +1,18 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub url: String,
-    pub provider: String,
+    pub provider: Cow<'static, str>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub published_date: Option<String>,
 }
 
 impl Source {
-    pub fn new(url: impl Into<String>, provider: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>, provider: impl Into<Cow<'static, str>>) -> Self {
         Self {
             url: url.into(),
             provider: provider.into(),
