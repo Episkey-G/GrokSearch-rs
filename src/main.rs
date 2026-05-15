@@ -4,9 +4,14 @@ use grok_search_rs::config::{self, Config, InitOutcome};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // CLI shim: `--init` / `init` scaffolds a config template and exits.
-    // Anything else falls through to MCP server mode.
+    // CLI shim: handle --version, --init before MCP server mode.
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V" || a == "-v") {
+        println!("grok-search-rs {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     if args.iter().any(|a| a == "init" || a == "--init") {
         return run_init();
     }
