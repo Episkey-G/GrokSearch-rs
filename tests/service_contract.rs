@@ -346,3 +346,49 @@ async fn get_sources_returns_same_payload_repeatedly() {
     assert_eq!(a.sources_count, b.sources_count);
     assert_eq!(a.sources, b.sources);
 }
+
+struct VerifiableAiProvider;
+
+#[async_trait]
+impl AiProvider for VerifiableAiProvider {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Ok(SearchResponse {
+            content: "verified answer".to_string(),
+            sources: vec![Source::new("https://primary.example/a", "grok_responses")],
+        })
+    }
+}
+
+#[tokio::test]
+async fn web_search_speculation_serves_enrichment_with_one_source_call() {
+    let provider = CountingSourceProvider::default();
+    let calls = provider.search_calls.clone();
+    let service = SearchService::fake_custom(
+        Some(Arc::new(VerifiableAiProvider)),
+        Arc::new(provider),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "2"),
+            ("GROK_SEARCH_FALLBACK_SOURCES", "5"),
+        ],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "speculation".to_string(),
+            extra_sources: None,
+            ..Default::default()
+        })
+        .await
+        .expect("output");
+
+    assert_eq!(output.search_provider, "grok_responses");
+    assert!(!output.fallback_used);
+    assert_eq!(*calls.lock().expect("lock"), 1);
+    // speculative call returned 5; truncated to extra_sources=2; merged with 1 grok = 3
+    assert_eq!(output.sources_count, 3);
+    assert!(output
+        .sources
+        .iter()
+        .any(|s| s.provider == "tavily_enrichment"));
+}

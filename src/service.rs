@@ -203,18 +203,34 @@ impl SearchService {
             exclude_domains: input.exclude_domains.clone(),
         };
 
+        // Speculative fan-out: fetch enough sources to satisfy whichever path
+        // (enrichment or fallback) the Grok response routes us into. The
+        // speculative call fires concurrently with Grok via tokio::join!, so
+        // total latency is roughly max(Grok, Tavily) instead of the sum. The
+        // single source call is then sliced to either `effective_extra_sources`
+        // (enrichment) or `self.config.fallback_sources` (fallback), preserving
+        // the legacy "exactly one source provider call per web_search" contract.
+        let speculative_count = effective_extra_sources.max(self.config.fallback_sources);
         let request = self.build_search_request(&input, &[]);
-        let response = match self.ai.search(&request).await {
+
+        let grok_future = self.ai.search(&request);
+        let speculative_future =
+            self.fetch_raw_extra_sources(&input.query, speculative_count, &filters);
+        let (grok_result, (raw_sources, raw_origin)) =
+            tokio::join!(grok_future, speculative_future);
+
+        let response = match grok_result {
             Ok(response) => response,
             Err(_) => {
                 return self
-                    .web_search_source_fallback(
+                    .finalize_fallback(
                         session_id,
                         SearchResponse {
                             content: String::new(),
                             sources: Vec::new(),
                         },
-                        &input,
+                        raw_sources,
+                        raw_origin,
                         "grok_provider_error",
                     )
                     .await;
@@ -223,19 +239,15 @@ impl SearchService {
 
         if let Some(reason) = grok_unverifiable_reason(&response) {
             return self
-                .web_search_source_fallback(session_id, response, &input, reason)
+                .finalize_fallback(session_id, response, raw_sources, raw_origin, reason)
                 .await;
         }
 
-        let extra_sources = self
-            .search_extra_sources(
-                &input.query,
-                effective_extra_sources,
-                &filters,
-                "tavily_enrichment",
-            )
-            .await;
-        let merged = merge_sources(response.sources, extra_sources);
+        let mut enrichment = raw_sources;
+        enrichment.truncate(effective_extra_sources);
+        let enrichment = with_provider(enrichment, enrichment_label(raw_origin));
+        let merged = merge_sources(response.sources, enrichment);
+
         let merged_arc = Arc::new(merged);
         let sources_count = merged_arc.len();
         self.cache
@@ -254,61 +266,50 @@ impl SearchService {
         })
     }
 
-    async fn search_extra_sources(
+    /// Fetch sources from the primary source provider (or fall through to
+    /// firecrawl) without applying a path-specific provider label. The
+    /// returned Vec carries each provider's native label ("tavily"/"firecrawl");
+    /// the caller re-labels via `with_provider` once the path (enrichment vs
+    /// fallback) is known.
+    async fn fetch_raw_extra_sources(
         &self,
         query: &str,
         count: usize,
         filters: &SearchFilters,
-        primary_provider: &'static str,
-    ) -> Vec<Source> {
+    ) -> (Vec<Source>, RawSourceOrigin) {
         if count == 0 {
-            return Vec::new();
+            return (Vec::new(), RawSourceOrigin::None);
         }
-
         if let Some(provider) = &self.sources {
-            let sources = provider
-                .search_sources(query, count, filters)
-                .await
-                .unwrap_or_default();
-            if !sources.is_empty() {
-                return with_provider(sources, primary_provider);
+            if let Ok(sources) = provider.search_sources(query, count, filters).await {
+                if !sources.is_empty() {
+                    return (sources, RawSourceOrigin::Primary);
+                }
             }
         }
-
         if let Some(provider) = &self.fallback_sources {
-            let sources = provider
-                .search_sources(query, count, filters)
-                .await
-                .unwrap_or_default();
-            if !sources.is_empty() {
-                return with_provider(sources, "firecrawl_enrichment");
+            if let Ok(sources) = provider.search_sources(query, count, filters).await {
+                if !sources.is_empty() {
+                    return (sources, RawSourceOrigin::Fallback);
+                }
             }
         }
-
-        Vec::new()
+        (Vec::new(), RawSourceOrigin::None)
     }
 
-    async fn web_search_source_fallback(
+    async fn finalize_fallback(
         &self,
         session_id: String,
         response: SearchResponse,
-        input: &WebSearchInput,
+        raw_sources: Vec<Source>,
+        raw_origin: RawSourceOrigin,
         reason: &str,
     ) -> Result<WebSearchOutput> {
-        let filters = SearchFilters {
-            recency_days: input.recency_days,
-            include_domains: input.include_domains.clone(),
-            exclude_domains: input.exclude_domains.clone(),
-        };
-        let fallback_sources = self
-            .search_extra_sources(
-                &input.query,
-                self.config.fallback_sources,
-                &filters,
-                "tavily_fallback",
-            )
-            .await;
-        let fallback_arc = Arc::new(fallback_sources);
+        let mut fallback = raw_sources;
+        fallback.truncate(self.config.fallback_sources);
+        let fallback = with_provider(fallback, fallback_label(raw_origin));
+
+        let fallback_arc = Arc::new(fallback);
         let sources_count = fallback_arc.len();
         self.cache
             .lock()
@@ -496,6 +497,29 @@ impl SearchService {
             }],
             tools: vec![SearchTool::web_search()],
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RawSourceOrigin {
+    None,
+    Primary,
+    Fallback,
+}
+
+fn enrichment_label(origin: RawSourceOrigin) -> &'static str {
+    match origin {
+        RawSourceOrigin::Primary => "tavily_enrichment",
+        RawSourceOrigin::Fallback => "firecrawl_enrichment",
+        RawSourceOrigin::None => "tavily_enrichment",
+    }
+}
+
+fn fallback_label(origin: RawSourceOrigin) -> &'static str {
+    match origin {
+        RawSourceOrigin::Primary => "tavily_fallback",
+        RawSourceOrigin::Fallback => "firecrawl_enrichment",
+        RawSourceOrigin::None => "tavily_fallback",
     }
 }
 
