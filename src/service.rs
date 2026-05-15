@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::cache::SourceCache;
@@ -11,7 +12,6 @@ use crate::model::search::{
 };
 use crate::model::source::{merge_sources, Source};
 use crate::model::tool::{GetSourcesOutput, WebSearchInput, WebSearchOutput};
-use crate::planning::{PlanResult, PlanningEngine};
 use crate::providers::firecrawl::FirecrawlProvider;
 use crate::providers::grok::GrokResponsesProvider;
 use crate::providers::tavily::TavilyProvider;
@@ -72,7 +72,6 @@ pub struct SearchService {
     sources: Option<Arc<dyn SourceProvider>>,
     fallback_sources: Option<Arc<dyn SourceProvider>>,
     cache: Arc<Mutex<SourceCache>>,
-    planning: Arc<Mutex<PlanningEngine>>,
 }
 
 impl SearchService {
@@ -115,7 +114,6 @@ impl SearchService {
 
         Ok(Self {
             cache: Arc::new(Mutex::new(SourceCache::new(config.cache_size))),
-            planning: Arc::new(Mutex::new(PlanningEngine::default())),
             config,
             ai,
             sources,
@@ -130,7 +128,6 @@ impl SearchService {
         ]);
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            planning: Arc::new(Mutex::new(PlanningEngine::default())),
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(Arc::new(FakeSourceProvider)),
@@ -160,7 +157,6 @@ impl SearchService {
 
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            planning: Arc::new(Mutex::new(PlanningEngine::default())),
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(sources),
@@ -191,7 +187,6 @@ impl SearchService {
 
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            planning: Arc::new(Mutex::new(PlanningEngine::default())),
             config,
             ai,
             sources: Some(sources),
@@ -226,7 +221,6 @@ impl SearchService {
 
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            planning: Arc::new(Mutex::new(PlanningEngine::default())),
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(primary),
@@ -269,10 +263,7 @@ impl SearchService {
             .await;
         let merged = merge_sources(response.sources, extra_sources);
         let sources_count = merged.len();
-        self.cache
-            .lock()
-            .expect("source cache poisoned")
-            .set(session_id.clone(), merged);
+        self.cache.lock().await.set(session_id.clone(), merged);
 
         Ok(WebSearchOutput {
             session_id,
@@ -334,7 +325,7 @@ impl SearchService {
         let sources_count = fallback_sources.len();
         self.cache
             .lock()
-            .expect("source cache poisoned")
+            .await
             .set(session_id.clone(), fallback_sources);
 
         let content = if response.content.trim().is_empty() {
@@ -361,9 +352,9 @@ impl SearchService {
         let sources = self
             .cache
             .lock()
-            .expect("source cache poisoned")
+            .await
             .get(session_id)
-            .ok_or_else(|| GrokSearchError::Provider("session_id_not_found".to_string()))?;
+            .ok_or_else(|| GrokSearchError::NotFound(format!("session_id={session_id}")))?;
         Ok(GetSourcesOutput {
             session_id: session_id.to_string(),
             sources_count: sources.len(),
@@ -397,21 +388,41 @@ impl SearchService {
             .await
     }
 
-    pub fn health(&self) -> String {
-        self.config.redacted_diagnostics()
-    }
+    /// Runtime diagnostics with live connectivity probes against each configured backend.
+    /// Returns provider availability flags, masked config, and per-provider reachability.
+    pub async fn doctor(&self) -> serde_json::Value {
+        let grok_probe = self.probe_grok().await;
+        let tavily_probe = match &self.sources {
+            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
+            None => Probe::skipped("TAVILY_API_KEY not configured"),
+        };
+        let firecrawl_probe = match &self.fallback_sources {
+            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
+            None => Probe::skipped("FIRECRAWL_API_KEY not configured"),
+        };
 
-    pub fn get_config_info(&self) -> serde_json::Value {
         serde_json::json!({
             "provider": "grok_responses",
-            "grok_api_url": self.config.grok_api_url,
-            "grok_model": self.config.grok_model,
-            "web_search_enabled": self.config.web_search_enabled,
-            "x_search_enabled": self.config.x_search_enabled,
-            "tavily_api_url": self.config.tavily_api_url,
-            "tavily_enabled": self.config.tavily_enabled,
-            "firecrawl_api_url": self.config.firecrawl_api_url,
-            "firecrawl_enabled": self.config.firecrawl_enabled,
+            "grok": {
+                "api_url": self.config.grok_api_url,
+                "model": self.config.grok_model,
+                "web_search_enabled": self.config.web_search_enabled,
+                "x_search_enabled": self.config.x_search_enabled,
+                "reachable": grok_probe.ok,
+                "detail": grok_probe.detail,
+            },
+            "tavily": {
+                "api_url": self.config.tavily_api_url,
+                "enabled": self.config.tavily_enabled,
+                "reachable": tavily_probe.ok,
+                "detail": tavily_probe.detail,
+            },
+            "firecrawl": {
+                "api_url": self.config.firecrawl_api_url,
+                "enabled": self.config.firecrawl_enabled,
+                "reachable": firecrawl_probe.ok,
+                "detail": firecrawl_probe.detail,
+            },
             "default_extra_sources": self.config.default_extra_sources,
             "fallback_sources": self.config.fallback_sources,
             "cache_size": self.config.cache_size,
@@ -420,131 +431,20 @@ impl SearchService {
         })
     }
 
-    pub fn switch_model(&self, model: &str) -> serde_json::Value {
-        serde_json::json!({
-            "status": "ok",
-            "message": "model override is accepted per web_search call; persistent runtime mutation is not used in Rust service",
-            "requested_model": model
-        })
-    }
-
-    pub fn plan_intent(
-        &self,
-        session_id: &str,
-        core_question: &str,
-        query_type: &str,
-        time_sensitivity: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_intent(
-                session_id,
-                core_question,
-                query_type,
-                time_sensitivity,
-                confidence,
-            )
-    }
-
-    pub fn plan_search(
-        &self,
-        query: &str,
-        complexity: &str,
-        time_sensitivity: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_search(query, complexity, time_sensitivity, confidence)
-    }
-
-    pub fn plan_complexity(
-        &self,
-        session_id: &str,
-        level: u8,
-        estimated_sub_queries: u32,
-        estimated_tool_calls: u32,
-        justification: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_complexity(
-                session_id,
-                level,
-                estimated_sub_queries,
-                estimated_tool_calls,
-                justification,
-                confidence,
-            )
-    }
-
-    pub fn plan_sub_query(
-        &self,
-        session_id: &str,
-        id: &str,
-        goal: &str,
-        expected_output: &str,
-        boundary: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_sub_query(session_id, id, goal, expected_output, boundary, confidence)
-    }
-
-    pub fn plan_search_term(
-        &self,
-        session_id: &str,
-        term: &str,
-        purpose: &str,
-        round: u32,
-        approach: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_search_term(session_id, term, purpose, round, approach, confidence)
-    }
-
-    pub fn plan_tool_mapping(
-        &self,
-        session_id: &str,
-        sub_query_id: &str,
-        tool: &str,
-        reason: &str,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_tool_mapping(session_id, sub_query_id, tool, reason, confidence)
-    }
-
-    pub fn plan_execution(
-        &self,
-        session_id: &str,
-        parallel: Vec<Vec<String>>,
-        sequential: Vec<String>,
-        estimated_rounds: u32,
-        confidence: f64,
-    ) -> PlanResult {
-        self.planning
-            .lock()
-            .expect("planning engine poisoned")
-            .plan_execution(
-                session_id,
-                parallel,
-                sequential,
-                estimated_rounds,
-                confidence,
-            )
+    async fn probe_grok(&self) -> Probe {
+        let request = SearchRequest {
+            model: self.config.grok_model.clone(),
+            system: None,
+            messages: vec![SearchMessage {
+                role: "user".to_string(),
+                content: vec![ContentBlock::text("ping")],
+            }],
+            tools: vec![],
+        };
+        match self.ai.search(&request).await {
+            Ok(_) => Probe::ok("grok responded"),
+            Err(err) => Probe::failed(err.to_string()),
+        }
     }
 
     fn build_search_request(
@@ -600,6 +500,40 @@ fn with_provider(mut sources: Vec<Source>, provider: &str) -> Vec<Source> {
         source.provider = provider.to_string();
     }
     sources
+}
+
+struct Probe {
+    ok: bool,
+    detail: String,
+}
+
+impl Probe {
+    fn ok(detail: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            detail: detail.into(),
+        }
+    }
+    fn failed(detail: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+        }
+    }
+    fn skipped(detail: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+async fn probe_source(provider: &dyn SourceProvider, sample_url: &str) -> Probe {
+    // Use a short keyword search as a lightweight liveness signal.
+    match provider.search_sources("ping", 1).await {
+        Ok(_) => Probe::ok(format!("reachable (sample probe via {sample_url} ok)")),
+        Err(err) => Probe::failed(err.to_string()),
+    }
 }
 
 struct FakeAiProvider;

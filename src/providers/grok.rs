@@ -50,7 +50,11 @@ impl GrokResponsesProvider {
             .send()
             .await
             .map_err(|err| {
-                GrokSearchError::Provider(format!("Grok Responses request failed: {err}"))
+                if err.is_timeout() {
+                    GrokSearchError::Timeout(format!("Grok Responses request timed out: {err}"))
+                } else {
+                    GrokSearchError::Provider(format!("Grok Responses request failed: {err}"))
+                }
             })?;
 
         let status = response.status();

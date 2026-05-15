@@ -58,7 +58,13 @@ impl FirecrawlProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| GrokSearchError::Provider(format!("Firecrawl request failed: {err}")))?;
+            .map_err(|err| {
+                if err.is_timeout() {
+                    GrokSearchError::Timeout(format!("Firecrawl request timed out: {err}"))
+                } else {
+                    GrokSearchError::Provider(format!("Firecrawl request failed: {err}"))
+                }
+            })?;
 
         let status = response.status();
         let text = response.text().await.map_err(|err| {

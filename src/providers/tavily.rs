@@ -75,7 +75,13 @@ impl TavilyProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| GrokSearchError::Provider(format!("Tavily request failed: {err}")))?;
+            .map_err(|err| {
+                if err.is_timeout() {
+                    GrokSearchError::Timeout(format!("Tavily request timed out: {err}"))
+                } else {
+                    GrokSearchError::Provider(format!("Tavily request failed: {err}"))
+                }
+            })?;
 
         let status = response.status();
         let text = response
