@@ -1,0 +1,133 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version (e.g. 0.1.5) without leading v"
+        required: true
+        type: string
+      dry_run:
+        description: "Only update files; skip commit/tag/push"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump version to ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version '${{ inputs.version }}' is not valid semver (X.Y.Z[-pre])." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail if tag already exists
+        run: |
+          if git rev-parse "refs/tags/v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "Tag v${{ inputs.version }} already exists." >&2
+            exit 1
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Update Cargo.toml
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib
+          v = os.environ["NEW_VERSION"]
+          p = pathlib.Path("Cargo.toml")
+          text = p.read_text()
+          new_text, n = re.subn(
+              r'(?m)^version\s*=\s*"[^"]+"',
+              f'version = "{v}"',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("Failed to find `version = \"...\"` in Cargo.toml")
+          p.write_text(new_text)
+          print(f"Cargo.toml -> {v}")
+          PY
+
+      - name: Update Cargo.lock
+        run: cargo update -p grok-search-rs
+
+      - name: Update npm package.json files
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const version = process.env.NEW_VERSION;
+
+          const mainPath = 'npm/grok-search-rs/package.json';
+          const main = JSON.parse(fs.readFileSync(mainPath, 'utf8'));
+          main.version = version;
+          if (main.optionalDependencies) {
+            for (const dep of Object.keys(main.optionalDependencies)) {
+              main.optionalDependencies[dep] = version;
+            }
+          }
+          fs.writeFileSync(mainPath, JSON.stringify(main, null, 2) + '\n');
+          console.log(`${mainPath} -> ${version}`);
+
+          const platformsDir = 'npm/platforms';
+          for (const entry of fs.readdirSync(platformsDir)) {
+            const pkgPath = path.join(platformsDir, entry, 'package.json');
+            if (!fs.existsSync(pkgPath)) continue;
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            pkg.version = version;
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+            console.log(`${pkgPath} -> ${version}`);
+          }
+          NODE
+
+      - name: Warn if CHANGELOG missing entry
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          if ! grep -qE "^## ${NEW_VERSION}( |$)" CHANGELOG.md; then
+            echo "::warning::CHANGELOG.md has no section for ${NEW_VERSION}. Add it before publishing."
+          fi
+
+      - name: Show diff
+        run: git --no-pager diff --stat
+
+      - name: Commit, tag and push
+        if: inputs.dry_run != true
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock npm/grok-search-rs/package.json npm/platforms/*/package.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit (already at v${NEW_VERSION})." >&2
+            exit 1
+          fi
+          git commit -m "Release grok-search-rs ${NEW_VERSION}"
+          git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
+          git push origin HEAD:${GITHUB_REF_NAME}
+          git push origin "v${NEW_VERSION}"

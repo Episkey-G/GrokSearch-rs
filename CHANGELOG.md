@@ -2,6 +2,25 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.5 - 2026-05-15
+
+### Removed
+
+- Planning compatibility tools (`plan_intent`, `plan_search`, `plan_search_term`, `plan_sub_query`, `plan_tool_mapping`, `plan_execution`, `plan_complexity`) and their tests.
+- Built-in tool toggle support (`toggle_builtin_tools`) and its test.
+- Auxiliary tools `health`, `get_config_info`, `switch_model` from the MCP surface.
+
+### Changed
+
+- Reduced MCP surface to 5 tools: `web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`.
+- Replaced ad-hoc health/config probes with a single `doctor` diagnostic that performs live connectivity checks against Grok, Tavily, and Firecrawl and returns masked configuration.
+- Tightened provider modules (`grok`, `tavily`, `firecrawl`) and simplified `SearchService` source caching.
+
+### Added
+
+- Tag-driven release pipeline: pushing `vX.Y.Z` builds binaries, publishes 6 npm packages, and syncs `Cargo.toml` / `Cargo.lock` / all `package.json` files back to `main` automatically.
+- Manual fallback `scripts/bump-version.sh` and `Bump Version` GitHub Actions workflow.
+
 ## 0.1.4 - 2026-05-15
 
 ### Fixed

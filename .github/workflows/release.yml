@@ -72,6 +72,26 @@ jobs:
         if: matrix.cross == true
         uses: taiki-e/install-action@cross
 
+      - name: Inject version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          echo "Injecting version $VERSION into Cargo.toml"
+          python3 - "$VERSION" <<'PY'
+          import sys, re, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          new_t, n = re.subn(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{v}"', t, count=1)
+          if n != 1:
+              raise SystemExit("could not find version field in Cargo.toml")
+          p.write_text(new_t)
+          PY
+          cargo update -p grok-search-rs
+
       - name: Build with cross
         if: matrix.cross == true
         run: cross build --release --target ${{ matrix.target }} --locked
@@ -266,3 +286,76 @@ jobs:
         working-directory: npm/grok-search-rs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  sync-main:
+    name: Sync version bump back to main
+    needs: [publish-npm, publish-npm-platforms, create-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply version to all manifests
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          echo "Applying $VERSION to source manifests"
+          python3 - "$VERSION" <<'PY'
+          import sys, re, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          new_t, n = re.subn(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{v}"', t, count=1)
+          if n != 1:
+              raise SystemExit("could not find version field in Cargo.toml")
+          p.write_text(new_t)
+          PY
+          cargo update -p grok-search-rs
+          VERSION="$VERSION" node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const version = process.env.VERSION;
+          const mainPath = 'npm/grok-search-rs/package.json';
+          const main = JSON.parse(fs.readFileSync(mainPath, 'utf8'));
+          main.version = version;
+          if (main.optionalDependencies) {
+            for (const dep of Object.keys(main.optionalDependencies)) {
+              main.optionalDependencies[dep] = version;
+            }
+          }
+          fs.writeFileSync(mainPath, JSON.stringify(main, null, 2) + '\n');
+          const platformsDir = 'npm/platforms';
+          for (const entry of fs.readdirSync(platformsDir)) {
+            const pkgPath = path.join(platformsDir, entry, 'package.json');
+            if (!fs.existsSync(pkgPath)) continue;
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            pkg.version = version;
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+          }
+          NODE
+
+      - name: Commit and push to main
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock npm/grok-search-rs/package.json npm/platforms/*/package.json
+          if git diff --cached --quiet; then
+            echo "main already at $VERSION, nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync manifests to $VERSION [skip ci]"
+          git pull --rebase origin main
+          git push origin main

@@ -30,3 +30,7 @@ cargo test
 ```
 
 For documentation-only changes, at minimum inspect changed Markdown for stale command names and secret-like values.
+
+## Releasing
+
+See [RELEASING.md](./RELEASING.md) for the version-bump and tag workflow.
