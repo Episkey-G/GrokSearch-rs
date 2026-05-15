@@ -135,68 +135,12 @@ impl SearchService {
         }
     }
 
-    pub fn fake_with_custom_sources_and_config<I, K, V>(
-        sources: Arc<dyn SourceProvider>,
-        overrides: I,
-    ) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let mut vars = vec![
-            ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
-            ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
-        ];
-        vars.extend(
-            overrides
-                .into_iter()
-                .map(|(key, value)| (key.into(), value.into())),
-        );
-        let config = Config::from_env_map(vars);
-
-        Self {
-            cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            config,
-            ai: Arc::new(FakeAiProvider),
-            sources: Some(sources),
-            fallback_sources: None,
-        }
-    }
-
-    pub fn fake_with_ai_and_sources<I, K, V>(
-        ai: Arc<dyn AiProvider>,
-        sources: Arc<dyn SourceProvider>,
-        overrides: I,
-    ) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let mut vars = vec![
-            ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
-            ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
-        ];
-        vars.extend(
-            overrides
-                .into_iter()
-                .map(|(key, value)| (key.into(), value.into())),
-        );
-        let config = Config::from_env_map(vars);
-
-        Self {
-            cache: Arc::new(Mutex::new(SourceCache::new(256))),
-            config,
-            ai,
-            sources: Some(sources),
-            fallback_sources: None,
-        }
-    }
-
-    pub fn fake_with_primary_and_fallback_sources<I, K, V>(
+    /// Unified test factory: override AI / primary / fallback providers and
+    /// inject extra env vars. Use `fake_with_sources()` for the trivial case.
+    pub fn fake_custom<I, K, V>(
+        ai: Option<Arc<dyn AiProvider>>,
         primary: Arc<dyn SourceProvider>,
-        fallback: Arc<dyn SourceProvider>,
+        fallback: Option<Arc<dyn SourceProvider>>,
         overrides: I,
     ) -> Self
     where
@@ -207,11 +151,13 @@ impl SearchService {
         let mut vars = vec![
             ("GROK_SEARCH_API_KEY".to_string(), "fake-grok".to_string()),
             ("TAVILY_API_KEY".to_string(), "fake-tavily".to_string()),
-            (
+        ];
+        if fallback.is_some() {
+            vars.push((
                 "FIRECRAWL_API_KEY".to_string(),
                 "fake-firecrawl".to_string(),
-            ),
-        ];
+            ));
+        }
         vars.extend(
             overrides
                 .into_iter()
@@ -222,9 +168,9 @@ impl SearchService {
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
             config,
-            ai: Arc::new(FakeAiProvider),
+            ai: ai.unwrap_or_else(|| Arc::new(FakeAiProvider)),
             sources: Some(primary),
-            fallback_sources: Some(fallback),
+            fallback_sources: fallback,
         }
     }
 
@@ -432,6 +378,12 @@ impl SearchService {
     }
 
     async fn probe_grok(&self) -> Probe {
+        // Mirror the real search shape so the probe doesn't fail the
+        // adapter's "web_search tool intent" pre-check.
+        let mut tools = Vec::new();
+        if self.config.web_search_enabled {
+            tools.push(SearchTool::web_search());
+        }
         let request = SearchRequest {
             model: self.config.grok_model.clone(),
             system: None,
@@ -439,7 +391,7 @@ impl SearchService {
                 role: "user".to_string(),
                 content: vec![ContentBlock::text("ping")],
             }],
-            tools: vec![],
+            tools,
         };
         match self.ai.search(&request).await {
             Ok(_) => Probe::ok("grok responded"),

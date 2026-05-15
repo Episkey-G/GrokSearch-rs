@@ -8,7 +8,7 @@ fn config_reads_grok_search_responses_defaults() {
     ]);
 
     assert_eq!(cfg.grok_api_url, "https://api.x.ai/v1");
-    assert_eq!(cfg.grok_model, "grok-4.3");
+    assert_eq!(cfg.grok_model, "grok-4-1-fast-reasoning");
     assert!(cfg.web_search_enabled);
     assert!(!cfg.x_search_enabled);
     assert_eq!(cfg.tavily_api_url, "https://api.tavily.com");

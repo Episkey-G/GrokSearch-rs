@@ -1,7 +1,8 @@
 use crate::adapters::grok_responses_request::to_grok_responses_payload;
 use crate::adapters::grok_responses_response::parse_grok_responses;
-use crate::error::{GrokSearchError, Result};
+use crate::error::Result;
 use crate::model::search::{SearchRequest, SearchResponse};
+use crate::providers::http::{build_client, post_json};
 use reqwest::Client;
 use std::time::Duration;
 
@@ -22,12 +23,8 @@ impl GrokResponsesProvider {
         include_x_search: bool,
         timeout: Duration,
     ) -> Self {
-        let client = Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new());
         Self {
-            client,
+            client: build_client(timeout),
             api_url: api_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             require_web_search,
@@ -42,34 +39,14 @@ impl GrokResponsesProvider {
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
         let payload =
             to_grok_responses_payload(request, self.require_web_search, self.include_x_search)?;
-        let response = self
-            .client
-            .post(self.endpoint())
-            .bearer_auth(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_timeout() {
-                    GrokSearchError::Timeout(format!("Grok Responses request timed out: {err}"))
-                } else {
-                    GrokSearchError::Provider(format!("Grok Responses request failed: {err}"))
-                }
-            })?;
-
-        let status = response.status();
-        let body = response.text().await.map_err(|err| {
-            GrokSearchError::Provider(format!("Grok Responses body read failed: {err}"))
-        })?;
-
-        if !status.is_success() {
-            return Err(GrokSearchError::Provider(format!(
-                "Grok Responses returned HTTP {status}: {body}"
-            )));
-        }
-
-        let raw = serde_json::from_str(&body)
-            .map_err(|err| GrokSearchError::Parse(format!("invalid Grok Responses JSON: {err}")))?;
+        let raw = post_json(
+            &self.client,
+            &self.endpoint(),
+            &self.api_key,
+            &payload,
+            "Grok Responses",
+        )
+        .await?;
         parse_grok_responses(&raw)
     }
 }

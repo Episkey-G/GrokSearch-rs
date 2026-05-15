@@ -8,7 +8,7 @@ GrokSearch-rs reads configuration from environment variables. The AI provider co
 |---|---|---|
 | `GROK_SEARCH_API_KEY` | required | Bearer token for the configured Grok-compatible gateway. |
 | `GROK_SEARCH_URL` | `https://api.x.ai` | Root URL, `/v1` base URL, or endpoint-like URL. The service normalizes it to a `/v1` base. |
-| `GROK_SEARCH_MODEL` | `grok-4.3` | Model sent in the Responses payload. |
+| `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model sent in the Responses payload. |
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Sends Responses `{"type":"web_search"}`. |
 | `GROK_SEARCH_X_SEARCH` | `false` | Sends Responses `{"type":"x_search"}` only when enabled. |
 
@@ -19,7 +19,7 @@ Example:
 ```bash
 GROK_SEARCH_API_KEY=...
 GROK_SEARCH_URL=https://api.modelverse.cn
-GROK_SEARCH_MODEL=grok-4.3
+GROK_SEARCH_MODEL=grok-4-1-fast-reasoning
 GROK_SEARCH_X_SEARCH=false
 ```
 

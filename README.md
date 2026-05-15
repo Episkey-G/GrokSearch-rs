@@ -27,7 +27,7 @@ claude mcp add-json grok-search-rs --scope user '{
   "env": {
     "GROK_SEARCH_API_KEY": "your-grok-compatible-key",
     "GROK_SEARCH_URL": "https://api.x.ai",
-    "GROK_SEARCH_MODEL": "grok-4.3",
+    "GROK_SEARCH_MODEL": "grok-4-1-fast-reasoning",
     "TAVILY_API_KEY": "your-tavily-key"
   }
 }'
@@ -54,7 +54,7 @@ Minimal `.env`:
 ```bash
 GROK_SEARCH_API_KEY=your-grok-compatible-key
 GROK_SEARCH_URL=https://api.x.ai
-GROK_SEARCH_MODEL=grok-4.3
+GROK_SEARCH_MODEL=grok-4-1-fast-reasoning
 
 TAVILY_API_KEY=your-tavily-key
 
@@ -89,7 +89,7 @@ FIRECRAWL_API_URL=https://api.firecrawl.dev
       "env": {
         "GROK_SEARCH_API_KEY": "your-grok-compatible-key",
         "GROK_SEARCH_URL": "https://api.x.ai",
-        "GROK_SEARCH_MODEL": "grok-4.3",
+        "GROK_SEARCH_MODEL": "grok-4-1-fast-reasoning",
         "TAVILY_API_KEY": "your-tavily-key"
       }
     }
@@ -105,12 +105,7 @@ FIRECRAWL_API_URL=https://api.firecrawl.dev
 | `get_sources` | Get full sources for a previous `web_search`. |
 | `web_fetch` | Fetch exact page content through Tavily, fallback Firecrawl. |
 | `web_map` | Discover URLs through Tavily Map. |
-| `health` | Show redacted runtime configuration. |
-| `get_config_info` | Show structured redacted configuration. |
-| `switch_model` | Compatibility helper for per-call model override. |
-| `toggle_builtin_tools` | Toggle built-in web tools for Claude, Codex, or Gemini project context. |
-| `plan_search` | One-shot search planning helper. |
-| `plan_*` | Compatibility phased planning tools. |
+| `doctor` | Live connectivity probe for Grok/Tavily/Firecrawl plus redacted config. |
 
 ## Development
 

@@ -85,8 +85,10 @@ impl AiProvider for EmptySourcesAiProvider {
 async fn web_search_uses_env_default_extra_sources_after_grok_success() {
     let source_provider = CountingSourceProvider::default();
     let search_calls = source_provider.search_calls.clone();
-    let service = SearchService::fake_with_custom_sources_and_config(
+    let service = SearchService::fake_custom(
+        None,
         Arc::new(source_provider),
+        None,
         [("GROK_SEARCH_EXTRA_SOURCES", "2")],
     );
 
@@ -124,9 +126,10 @@ async fn web_search_uses_env_default_extra_sources_after_grok_success() {
 async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
     let source_provider = CountingSourceProvider::default();
     let search_calls = source_provider.search_calls.clone();
-    let service = SearchService::fake_with_ai_and_sources(
-        Arc::new(EmptySourcesAiProvider),
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
         Arc::new(source_provider),
+        None,
         [("GROK_SEARCH_FALLBACK_SOURCES", "4")],
     );
 
@@ -204,9 +207,10 @@ impl SourceProvider for FirecrawlLikeSourceProvider {
 
 #[tokio::test]
 async fn web_fetch_uses_firecrawl_when_tavily_fetch_fails() {
-    let service = SearchService::fake_with_primary_and_fallback_sources(
+    let service = SearchService::fake_custom(
+        None,
         Arc::new(FailingSourceProvider),
-        Arc::new(FirecrawlLikeSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
         [] as [(&str, &str); 0],
     );
 

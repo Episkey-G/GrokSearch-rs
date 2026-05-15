@@ -18,9 +18,8 @@ cargo test
 | Grok Responses payload and response adapters | `cargo test --test adapter_grok_responses` |
 | Search orchestration | `cargo test --test service_contract` |
 | Tavily parsing | `cargo test --test tavily_parse` |
-| Built-in tool toggles | `cargo test --test toggle_builtin_tools` |
-| Planning tools | `cargo test --test planning` |
 | Source merge behavior | `cargo test --test source_merge` |
+| Logging | `cargo test --test logging` |
 
 ## Live Smoke Testing
 

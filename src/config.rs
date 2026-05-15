@@ -39,7 +39,7 @@ impl Config {
         Self {
             grok_api_url: normalize_v1_base(&get(&map, "GROK_SEARCH_URL", "https://api.x.ai")),
             grok_api_key: map.get("GROK_SEARCH_API_KEY").cloned(),
-            grok_model: get(&map, "GROK_SEARCH_MODEL", "grok-4.3"),
+            grok_model: get(&map, "GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
             web_search_enabled: bool_value(&map, "GROK_SEARCH_WEB_SEARCH", true),
             x_search_enabled: bool_value(&map, "GROK_SEARCH_X_SEARCH", false),
             tavily_api_url: normalize_plain_base(&get(

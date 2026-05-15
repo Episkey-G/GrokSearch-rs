@@ -1,5 +1,6 @@
 use crate::error::{GrokSearchError, Result};
 use crate::model::source::Source;
+use crate::providers::http::{build_client, post_json};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -13,12 +14,8 @@ pub struct FirecrawlProvider {
 
 impl FirecrawlProvider {
     pub fn new(api_url: impl Into<String>, api_key: impl Into<String>, timeout: Duration) -> Self {
-        let client = Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new());
         Self {
-            client,
+            client: build_client(timeout),
             api_url: api_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
@@ -26,14 +23,14 @@ impl FirecrawlProvider {
 
     pub async fn search(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
         let raw = self
-            .post_json("search", json!({ "query": query, "limit": max_results }))
+            .post("search", &json!({ "query": query, "limit": max_results }))
             .await?;
         Ok(normalize_firecrawl_results(&raw))
     }
 
     pub async fn scrape(&self, url: &str) -> Result<String> {
         let raw = self
-            .post_json("scrape", json!({ "url": url, "formats": ["markdown"] }))
+            .post("scrape", &json!({ "url": url, "formats": ["markdown"] }))
             .await?;
         let content = raw
             .get("data")
@@ -49,36 +46,9 @@ impl FirecrawlProvider {
         })
     }
 
-    async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
+    async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}", self.api_url, path.trim_start_matches('/'));
-        let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_timeout() {
-                    GrokSearchError::Timeout(format!("Firecrawl request timed out: {err}"))
-                } else {
-                    GrokSearchError::Provider(format!("Firecrawl request failed: {err}"))
-                }
-            })?;
-
-        let status = response.status();
-        let text = response.text().await.map_err(|err| {
-            GrokSearchError::Provider(format!("Firecrawl body read failed: {err}"))
-        })?;
-
-        if !status.is_success() {
-            return Err(GrokSearchError::Provider(format!(
-                "Firecrawl returned HTTP {status}: {text}"
-            )));
-        }
-
-        serde_json::from_str(&text)
-            .map_err(|err| GrokSearchError::Parse(format!("invalid Firecrawl JSON: {err}")))
+        post_json(&self.client, &endpoint, &self.api_key, body, "Firecrawl").await
     }
 }
 
