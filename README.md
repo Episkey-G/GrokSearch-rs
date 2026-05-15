@@ -22,7 +22,7 @@
 - 📥 **Tavily fetch / map** — full‑text extract and link discovery with one call.
 - 🛟 **Firecrawl fallback** — when Tavily refuses or returns thin content.
 - 🩺 **Doctor probe** — `doctor` tool reports connectivity + redacted config in seconds.
-- 📦 **Zero install** — `npx grok-search-rs` downloads a native binary per platform.
+- 📦 **One‑line install** — `npm install -g grok-search-rs` for the lean native binary; `npx grok-search-rs` also works (keeps Node resident as a stdio shim).
 
 ---
 
@@ -36,10 +36,31 @@ You need at least:
 | `TAVILY_API_KEY`      | ✅ | <https://tavily.com> |
 | `FIRECRAWL_API_KEY`   | optional | <https://firecrawl.dev> (fetch fallback) |
 
+> 💡 **Recommended**: install once globally, then point your MCP client at the native binary directly. This skips the Node `npx` wrapper (~30–50 MB resident) and gives you the true single‑digit‑MB Rust process.
+>
+> ```bash
+> npm install -g grok-search-rs
+> which grok-search-rs   # macOS / Linux — copy the printed path
+> # Windows: where grok-search-rs
+> ```
+
 Pick your client:
 
 <details open>
-<summary><b>Claude Code</b> — one command</summary>
+<summary><b>Claude Code</b> — one command (recommended, native binary)</summary>
+
+```bash
+claude mcp add-json grok-search-rs --scope user '{
+  "type": "stdio",
+  "command": "grok-search-rs",
+  "env": {
+    "GROK_SEARCH_API_KEY": "xai-...",
+    "TAVILY_API_KEY": "tvly-..."
+  }
+}'
+```
+
+Prefer `npx` (no global install, but Node stays resident):
 
 ```bash
 claude mcp add-json grok-search-rs --scope user '{
@@ -58,6 +79,16 @@ claude mcp add-json grok-search-rs --scope user '{
 <details>
 <summary><b>Codex CLI</b> — edit <code>~/.codex/config.toml</code></summary>
 
+Recommended (native binary):
+
+```toml
+[mcp_servers.grok-search-rs]
+command = "grok-search-rs"
+env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
+```
+
+Or via npx:
+
 ```toml
 [mcp_servers.grok-search-rs]
 command = "npx"
@@ -74,8 +105,7 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 {
   "mcpServers": {
     "grok-search-rs": {
-      "command": "npx",
-      "args": ["-y", "grok-search-rs"],
+      "command": "grok-search-rs",
       "env": {
         "GROK_SEARCH_API_KEY": "xai-...",
         "TAVILY_API_KEY": "tvly-..."
@@ -84,6 +114,8 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
   }
 }
 ```
+
+Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-search-rs"]` if you'd rather not install globally.
 
 </details>
 
@@ -94,8 +126,7 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 {
   "mcpServers": {
     "grok-search-rs": {
-      "command": "npx",
-      "args": ["-y", "grok-search-rs"],
+      "command": "grok-search-rs",
       "env": {
         "GROK_SEARCH_API_KEY": "xai-...",
         "TAVILY_API_KEY": "tvly-..."
@@ -115,8 +146,7 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
   "servers": {
     "grok-search-rs": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "grok-search-rs"],
+      "command": "grok-search-rs",
       "env": {
         "GROK_SEARCH_API_KEY": "xai-...",
         "TAVILY_API_KEY": "tvly-..."
@@ -135,8 +165,7 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 {
   "mcpServers": {
     "grok-search-rs": {
-      "command": "npx",
-      "args": ["-y", "grok-search-rs"],
+      "command": "grok-search-rs",
       "env": {
         "GROK_SEARCH_API_KEY": "xai-...",
         "TAVILY_API_KEY": "tvly-..."
@@ -148,7 +177,7 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 
 </details>
 
-> ⚠️ `npx grok-search-rs` is **not meant to be launched directly**. It speaks MCP over stdio — your client launches it. Running it in a terminal prints an onboarding guide.
+> ⚠️ `grok-search-rs` / `npx grok-search-rs` is **not meant to be launched directly**. It speaks MCP over stdio — your client launches it. Running it in a terminal prints an onboarding guide.
 
 ---
 
@@ -173,6 +202,23 @@ Install the grok-search-rs MCP server (npx -y grok-search-rs) into my current cl
 | `doctor`      | Live connectivity probe + redacted config dump. Use it first when something looks off. |
 
 Rule of thumb: **`web_search` returns answer + sources inline every call; use `web_fetch` for exact evidence and `web_map` for URL discovery. `get_sources` only re-fetches an earlier session's cache.**
+
+### Search modes — `web_search` vs `x_search`
+
+`grok-search-rs` enables Grok's **`web_search` tool by default** — every `web_search` MCP call hits the open web through Grok Responses and is supplemented by Tavily.
+
+Grok's **`x_search` tool** (search inside X/Twitter) is **opt‑in** — set `GROK_SEARCH_X_SEARCH=true` to enable it alongside web search. Both tools are then offered to Grok and it picks per query.
+
+```bash
+# Default — web only
+GROK_SEARCH_WEB_SEARCH=true   # already the default, shown for clarity
+GROK_SEARCH_X_SEARCH=false    # default
+
+# Enable X/Twitter search in addition to the open web
+GROK_SEARCH_X_SEARCH=true
+```
+
+> Note: `x_search` requires your Grok endpoint / upstream proxy to actually expose the `x_search` tool type. xAI's official API does; some relays may strip it.
 
 ---
 
@@ -258,6 +304,11 @@ More docs:
 <a href="https://www.star-history.com/?repos=Episkey-G%2FGrokSearch-rs&type=Date">
   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" />
 </a>
+
+## 🙏 Acknowledgements
+
+- Inspired by [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch) — the original Python implementation that pioneered the Grok + Tavily + Firecrawl combo this project rewrites in Rust.
+- Thanks to the [LinuxDo](https://linux.do) community for the discussions, feedback, and the prior art that inspired this rewrite.
 
 ## 📜 License
 
