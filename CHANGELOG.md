@@ -2,6 +2,13 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.4 - 2026-05-15
+
+### Fixed
+
+- Ignored JSON-RPC notifications such as `notifications/initialized` instead of emitting `id: null` error responses during MCP startup.
+- Added MCP `ping` request support.
+
 ## 0.1.3 - 2026-05-15
 
 ### Fixed

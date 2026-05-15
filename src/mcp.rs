@@ -24,15 +24,23 @@ pub async fn run_stdio(service: SearchService) -> anyhow::Result<()> {
             }
         };
 
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let response = handle_request(&service, request)
-            .await
-            .unwrap_or_else(|err| error_response(id, -32000, err.to_string()));
-        stdout.write_all(response.to_string().as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
+        if let Some(response) = handle_message(&service, request).await {
+            stdout.write_all(response.to_string().as_bytes()).await?;
+            stdout.write_all(b"\n").await?;
+        }
     }
 
     Ok(())
+}
+
+async fn handle_message(service: &SearchService, request: Value) -> Option<Value> {
+    request.get("id")?;
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    Some(
+        handle_request(service, request)
+            .await
+            .unwrap_or_else(|err| error_response(id, -32000, err.to_string())),
+    )
 }
 
 async fn handle_request(service: &SearchService, request: Value) -> Result<Value> {
@@ -56,6 +64,7 @@ async fn handle_request(service: &SearchService, request: Value) -> Result<Value
                 }
             }),
         )),
+        "ping" => Ok(success_response(id, json!({}))),
         "tools/list" => Ok(success_response(id, tools_list())),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -467,4 +476,43 @@ fn error_response(id: Value, code: i64, message: String) -> Value {
             "message": message
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initialized_notification_does_not_emit_response() {
+        let service = SearchService::fake_with_sources();
+        let response = handle_message(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }),
+        )
+        .await;
+
+        assert_eq!(response, None);
+    }
+
+    #[tokio::test]
+    async fn ping_request_gets_empty_success_response() {
+        let service = SearchService::fake_with_sources();
+        let response = handle_request(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "ping"
+            }),
+        )
+        .await
+        .expect("ping response");
+
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"], json!({}));
+    }
 }
