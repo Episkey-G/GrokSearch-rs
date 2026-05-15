@@ -119,6 +119,13 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
                     .get("extra_sources")
                     .and_then(Value::as_u64)
                     .map(|value| value as usize),
+                recency_days: args
+                    .get("recency_days")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32)
+                    .filter(|value| *value > 0),
+                include_domains: parse_string_array(args.get("include_domains")),
+                exclude_domains: parse_string_array(args.get("exclude_domains")),
             };
             let output = service.web_search(input).await?;
             Ok(serde_json::to_value(output)
@@ -139,8 +146,14 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
             let url = args.get("url").and_then(Value::as_str).ok_or_else(|| {
                 GrokSearchError::InvalidParams("web_fetch.url is required".into())
             })?;
-            let content = service.web_fetch(url).await?;
-            Ok(json!({ "url": url, "content": content }))
+            let max_chars = args
+                .get("max_chars")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .filter(|value| *value > 0);
+            let output = service.web_fetch(url, max_chars).await?;
+            Ok(serde_json::to_value(output)
+                .map_err(|err| GrokSearchError::Parse(format!("serialize fetch: {err}")))?)
         }
         "web_map" => {
             let url = args
@@ -181,6 +194,21 @@ fn tools_list() -> Value {
                             "type": "integer",
                             "minimum": 0,
                             "description": "Optional supplemental source count. Tavily is primary; Firecrawl is fallback. If omitted, GROK_SEARCH_EXTRA_SOURCES is used."
+                        },
+                        "recency_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Restrict supplemental results to sources published within the last N days. Forwarded to Tavily as days+topic=news; also hinted to Grok prompt."
+                        },
+                        "include_domains": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Only return supplemental results from these domains. Tavily honors strictly; Grok receives as soft preference."
+                        },
+                        "exclude_domains": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Suppress supplemental results from these domains. Tavily honors strictly; Grok receives as soft instruction."
                         }
                     }
                 }
@@ -198,12 +226,17 @@ fn tools_list() -> Value {
             },
             {
                 "name": "web_fetch",
-                "description": "Fetch one page through Tavily Extract, with Firecrawl scrape fallback when configured.",
+                "description": "Fetch one page through Tavily Extract, with Firecrawl scrape fallback when configured. Returns {url, content, original_length, truncated}.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["url"],
                     "properties": {
-                        "url": { "type": "string" }
+                        "url": { "type": "string" },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional character cap on returned content. Falls back to GROK_SEARCH_FETCH_MAX_CHARS, otherwise unlimited."
+                        }
                     }
                 }
             },
@@ -226,6 +259,21 @@ fn tools_list() -> Value {
             }
         ]
     })
+}
+
+fn parse_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn success_response(id: Value, result: Value) -> Value {

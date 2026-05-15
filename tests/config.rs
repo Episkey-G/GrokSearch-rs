@@ -13,7 +13,7 @@ fn config_reads_grok_search_responses_defaults() {
     assert!(!cfg.x_search_enabled);
     assert_eq!(cfg.tavily_api_url, "https://api.tavily.com");
     assert!(cfg.tavily_enabled);
-    assert_eq!(cfg.default_extra_sources, 0);
+    assert_eq!(cfg.default_extra_sources, 3);
     assert_eq!(cfg.fallback_sources, 5);
     assert_eq!(cfg.timeout.as_secs(), 60);
 }
@@ -112,7 +112,7 @@ fn invalid_source_counts_fall_back_to_safe_defaults() {
         ("GROK_SEARCH_FALLBACK_SOURCES", "not-a-number"),
     ]);
 
-    assert_eq!(cfg.default_extra_sources, 0);
+    assert_eq!(cfg.default_extra_sources, 3);
     assert_eq!(cfg.fallback_sources, 5);
     assert_eq!(cfg.timeout.as_secs(), 60);
 }

@@ -2,6 +2,19 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.7 - 2026-05-15
+
+### Added
+
+- `web_search` 新增 `recency_days` / `include_domains` / `exclude_domains` 输入参数：Tavily 端真过滤（`days` + `topic=news` 及 include/exclude 域名），Grok 端以软提示形式注入 prompt。
+- `web_fetch` 新增 `max_chars` 输入参数与 `GROK_SEARCH_FETCH_MAX_CHARS` 环境兜底；返回结构扩展为 `{url, content, original_length, truncated}`，便于 LLM 感知截断。
+
+### Changed
+
+- `web_search` 输出回炉：撤掉懒加载契约与 `sources_preview` 字段，改为常驻 `sources: [...]`——成功路径返回 Grok 原生 + Tavily 补强 merge 后的完整列表；fallback 路径返回 Tavily 兜底的完整列表。每条含 `{url, provider, title?, description?, published_date?}`。`session_id` 与 `get_sources` 保留作缓存回查入口，但不再是获取首次响应来源的必经路径。
+- `GROK_SEARCH_EXTRA_SOURCES` 默认值由 `0` 调整为 `3`，使开放检索默认即享 Tavily 补强；如需关闭显式设 `0`。
+- `SourceProvider::search_sources` trait 签名扩展接收 `&SearchFilters`，Tavily 透传，Firecrawl 忽略（无对应能力）。
+
 ## 0.1.6 - 2026-05-15
 
 ### Fixed

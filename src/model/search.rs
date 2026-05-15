@@ -57,3 +57,19 @@ pub struct SearchResponse {
     pub content: String,
     pub sources: Vec<crate::model::source::Source>,
 }
+
+/// Structured retrieval filters shared by source providers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchFilters {
+    pub recency_days: Option<u32>,
+    pub include_domains: Vec<String>,
+    pub exclude_domains: Vec<String>,
+}
+
+impl SearchFilters {
+    pub fn is_empty(&self) -> bool {
+        self.recency_days.is_none()
+            && self.include_domains.is_empty()
+            && self.exclude_domains.is_empty()
+    }
+}

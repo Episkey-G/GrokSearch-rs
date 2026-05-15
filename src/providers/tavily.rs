@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::model::search::SearchFilters;
 use crate::model::source::Source;
 use crate::providers::http::{build_client, post_json};
 use reqwest::Client;
@@ -23,15 +24,16 @@ impl TavilyProvider {
         }
     }
 
-    pub async fn search(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
+    pub async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
         let raw = self
             .post(
                 "search",
-                &json!({
-                    "query": query,
-                    "max_results": max_results,
-                    "include_answer": false
-                }),
+                &tavily_search_request_body(query, max_results, filters),
             )
             .await?;
         Ok(normalize_tavily_results(&raw))
@@ -69,6 +71,38 @@ impl TavilyProvider {
         let endpoint = format!("{}/{}", self.api_url, path.trim_start_matches('/'));
         post_json(&self.client, &endpoint, &self.api_key, body, "Tavily").await
     }
+}
+
+pub fn tavily_search_request_body(
+    query: &str,
+    max_results: usize,
+    filters: &SearchFilters,
+) -> Value {
+    let mut body = json!({
+        "query": query,
+        "max_results": max_results,
+        "include_answer": false,
+    });
+    let map = body
+        .as_object_mut()
+        .expect("tavily search body must be object");
+    if let Some(days) = filters.recency_days {
+        map.insert("days".to_string(), json!(days));
+        map.insert("topic".to_string(), json!("news"));
+    }
+    if !filters.include_domains.is_empty() {
+        map.insert(
+            "include_domains".to_string(),
+            json!(filters.include_domains),
+        );
+    }
+    if !filters.exclude_domains.is_empty() {
+        map.insert(
+            "exclude_domains".to_string(),
+            json!(filters.exclude_domains),
+        );
+    }
+    body
 }
 
 pub fn tavily_map_request_body(url: &str, max_results: usize) -> Value {

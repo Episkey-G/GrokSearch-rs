@@ -16,6 +16,7 @@ pub struct Config {
     pub firecrawl_enabled: bool,
     pub default_extra_sources: usize,
     pub fallback_sources: usize,
+    pub fetch_max_chars: Option<usize>,
     pub cache_size: usize,
     pub timeout: Duration,
 }
@@ -56,8 +57,9 @@ impl Config {
             )),
             firecrawl_api_key: map.get("FIRECRAWL_API_KEY").cloned(),
             firecrawl_enabled: bool_value(&map, "FIRECRAWL_ENABLED", true),
-            default_extra_sources: usize_value(&map, "GROK_SEARCH_EXTRA_SOURCES", 0),
+            default_extra_sources: usize_value(&map, "GROK_SEARCH_EXTRA_SOURCES", 3),
             fallback_sources: usize_value(&map, "GROK_SEARCH_FALLBACK_SOURCES", 5),
+            fetch_max_chars: optional_positive_usize(&map, "GROK_SEARCH_FETCH_MAX_CHARS"),
             cache_size: usize_value(&map, "GROK_SEARCH_CACHE_SIZE", 256),
             timeout: Duration::from_secs(u64_value(&map, "GROK_SEARCH_TIMEOUT_SECONDS", 60)),
         }
@@ -122,6 +124,12 @@ fn usize_value(map: &HashMap<String, String>, key: &str, default: usize) -> usiz
     map.get(key)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn optional_positive_usize(map: &HashMap<String, String>, key: &str) -> Option<usize> {
+    map.get(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn redact(value: Option<&str>) -> String {

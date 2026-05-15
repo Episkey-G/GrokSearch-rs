@@ -32,7 +32,7 @@ The example above calls `https://api.modelverse.cn/v1/responses`.
 | `TAVILY_API_KEY` | unset | Enables Tavily-backed source enrichment, fallback, fetch, and map. |
 | `TAVILY_API_URL` | `https://api.tavily.com` | Tavily API base URL. |
 | `TAVILY_ENABLED` | `true` | Optional override. Set to `false` only when you want to disable Tavily even if `TAVILY_API_KEY` is configured. |
-| `GROK_SEARCH_EXTRA_SOURCES` | `0` | Adds Tavily enrichment sources after a verifiable Grok result; Firecrawl can fallback if Tavily returns none. |
+| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Adds Tavily enrichment sources after a verifiable Grok result; Firecrawl can fallback if Tavily returns none. Set `0` to disable enrichment. |
 | `GROK_SEARCH_FALLBACK_SOURCES` | `5` | Number of fallback sources to cache when Grok is unverifiable. |
 
 ## Firecrawl
@@ -49,3 +49,4 @@ The example above calls `https://api.modelverse.cn/v1/responses`.
 |---|---|---|
 | `GROK_SEARCH_CACHE_SIZE` | `256` | Maximum cached search sessions for `get_sources`. |
 | `GROK_SEARCH_TIMEOUT_SECONDS` | `60` | HTTP timeout for Grok, Tavily, and Firecrawl requests. |
+| `GROK_SEARCH_FETCH_MAX_CHARS` | unset | Default character cap on `web_fetch` content. Overridden per call by `max_chars`. Unset means no truncation. |

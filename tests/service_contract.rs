@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use grok_search_rs::error::Result;
-use grok_search_rs::model::search::{SearchRequest, SearchResponse};
+use grok_search_rs::model::search::{SearchFilters, SearchRequest, SearchResponse};
 use grok_search_rs::model::source::Source;
 use grok_search_rs::model::tool::WebSearchInput;
 use grok_search_rs::service::{AiProvider, SearchService, SourceProvider};
@@ -29,6 +29,7 @@ async fn web_search_returns_content_and_caches_sources() {
             platform: None,
             model: None,
             extra_sources: Some(2),
+            ..Default::default()
         })
         .await
         .expect("search output");
@@ -38,6 +39,11 @@ async fn web_search_returns_content_and_caches_sources() {
     assert_eq!(output.search_provider, "grok_responses");
     assert!(!output.fallback_used);
     assert_eq!(output.fallback_reason, None);
+    assert_eq!(output.sources.len(), output.sources_count);
+    assert!(output
+        .sources
+        .iter()
+        .any(|source| source.provider == "grok_responses"));
 
     let sources = service
         .get_sources(&output.session_id)
@@ -53,7 +59,12 @@ struct CountingSourceProvider {
 
 #[async_trait]
 impl SourceProvider for CountingSourceProvider {
-    async fn search_sources(&self, _query: &str, max_results: usize) -> Result<Vec<Source>> {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
         *self.search_calls.lock().expect("search call lock") += 1;
         Ok((0..max_results)
             .map(|idx| Source::new(format!("https://example.com/enrichment-{idx}"), "tavily"))
@@ -98,6 +109,7 @@ async fn web_search_uses_env_default_extra_sources_after_grok_success() {
             platform: None,
             model: None,
             extra_sources: None,
+            ..Default::default()
         })
         .await
         .expect("search output");
@@ -139,6 +151,7 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
             platform: None,
             model: None,
             extra_sources: None,
+            ..Default::default()
         })
         .await
         .expect("fallback output");
@@ -161,13 +174,44 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
         .sources
         .iter()
         .all(|source| source.provider == "tavily_fallback"));
+
+    assert_eq!(output.sources.len(), 4);
+    assert!(output
+        .sources
+        .iter()
+        .all(|item| item.provider == "tavily_fallback"));
+}
+
+#[tokio::test]
+async fn web_search_success_path_returns_inline_sources() {
+    let service = SearchService::fake_with_sources();
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "ping".to_string(),
+            platform: None,
+            model: None,
+            extra_sources: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("search output");
+
+    assert!(!output.fallback_used);
+    assert_eq!(output.sources.len(), output.sources_count);
+    assert!(output.sources_count >= 1);
 }
 
 struct FailingSourceProvider;
 
 #[async_trait]
 impl SourceProvider for FailingSourceProvider {
-    async fn search_sources(&self, _query: &str, _max_results: usize) -> Result<Vec<Source>> {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
         Err(grok_search_rs::error::GrokSearchError::Provider(
             "source failed".to_string(),
         ))
@@ -190,7 +234,12 @@ struct FirecrawlLikeSourceProvider;
 
 #[async_trait]
 impl SourceProvider for FirecrawlLikeSourceProvider {
-    async fn search_sources(&self, _query: &str, max_results: usize) -> Result<Vec<Source>> {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
         Ok((0..max_results)
             .map(|idx| Source::new(format!("https://firecrawl.example/{idx}"), "firecrawl"))
             .collect())
@@ -214,10 +263,67 @@ async fn web_fetch_uses_firecrawl_when_tavily_fetch_fails() {
         [] as [(&str, &str); 0],
     );
 
-    let content = service
-        .web_fetch("https://example.com/article")
+    let output = service
+        .web_fetch("https://example.com/article", None)
         .await
         .expect("fetch output");
 
-    assert!(content.contains("firecrawl fallback content"));
+    assert!(output.content.contains("firecrawl fallback content"));
+    assert!(!output.truncated);
+    assert_eq!(output.original_length, output.content.chars().count());
+}
+
+#[tokio::test]
+async fn web_fetch_truncates_to_max_chars_when_explicit() {
+    let service = SearchService::fake_with_sources();
+
+    let output = service
+        .web_fetch("https://example.com/large", Some(10))
+        .await
+        .expect("fetch output");
+
+    assert!(output.truncated);
+    assert_eq!(output.content.chars().count(), 10);
+    assert!(output.original_length > 10);
+}
+
+struct LongFetchSourceProvider;
+
+#[async_trait]
+impl SourceProvider for LongFetchSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<String> {
+        Ok("abcdefghijklmnop".to_string())
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn web_fetch_truncates_via_env_default() {
+    let service = SearchService::fake_custom(
+        None,
+        Arc::new(LongFetchSourceProvider),
+        None,
+        [("GROK_SEARCH_FETCH_MAX_CHARS", "5")],
+    );
+
+    let output = service
+        .web_fetch("https://example.com/page", None)
+        .await
+        .expect("fetch output");
+
+    assert!(output.truncated);
+    assert_eq!(output.content.chars().count(), 5);
+    assert_eq!(output.original_length, 16);
 }

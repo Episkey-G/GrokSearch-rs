@@ -8,10 +8,10 @@ use crate::cache::SourceCache;
 use crate::config::Config;
 use crate::error::{GrokSearchError, Result};
 use crate::model::search::{
-    ContentBlock, SearchMessage, SearchRequest, SearchResponse, SearchTool,
+    ContentBlock, SearchFilters, SearchMessage, SearchRequest, SearchResponse, SearchTool,
 };
 use crate::model::source::{merge_sources, Source};
-use crate::model::tool::{GetSourcesOutput, WebSearchInput, WebSearchOutput};
+use crate::model::tool::{GetSourcesOutput, WebFetchOutput, WebSearchInput, WebSearchOutput};
 use crate::providers::firecrawl::FirecrawlProvider;
 use crate::providers::grok::GrokResponsesProvider;
 use crate::providers::tavily::TavilyProvider;
@@ -23,7 +23,12 @@ pub trait AiProvider: Send + Sync {
 
 #[async_trait]
 pub trait SourceProvider: Send + Sync {
-    async fn search_sources(&self, query: &str, max_results: usize) -> Result<Vec<Source>>;
+    async fn search_sources(
+        &self,
+        query: &str,
+        max_results: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<Source>>;
     async fn fetch(&self, url: &str) -> Result<String>;
     async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>>;
 }
@@ -37,8 +42,13 @@ impl AiProvider for GrokResponsesProvider {
 
 #[async_trait]
 impl SourceProvider for TavilyProvider {
-    async fn search_sources(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
-        self.search(query, max_results).await
+    async fn search_sources(
+        &self,
+        query: &str,
+        max_results: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        self.search(query, max_results, filters).await
     }
 
     async fn fetch(&self, url: &str) -> Result<String> {
@@ -52,7 +62,13 @@ impl SourceProvider for TavilyProvider {
 
 #[async_trait]
 impl SourceProvider for FirecrawlProvider {
-    async fn search_sources(&self, query: &str, max_results: usize) -> Result<Vec<Source>> {
+    async fn search_sources(
+        &self,
+        query: &str,
+        max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        // Firecrawl search has no structured recency/domain filter; ignore filters.
         FirecrawlProvider::search(self, query, max_results).await
     }
 
@@ -180,6 +196,12 @@ impl SearchService {
             .extra_sources
             .unwrap_or(self.config.default_extra_sources);
 
+        let filters = SearchFilters {
+            recency_days: input.recency_days,
+            include_domains: input.include_domains.clone(),
+            exclude_domains: input.exclude_domains.clone(),
+        };
+
         let request = self.build_search_request(&input, &[]);
         let response = match self.ai.search(&request).await {
             Ok(response) => response,
@@ -205,16 +227,25 @@ impl SearchService {
         }
 
         let extra_sources = self
-            .search_extra_sources(&input.query, effective_extra_sources, "tavily_enrichment")
+            .search_extra_sources(
+                &input.query,
+                effective_extra_sources,
+                &filters,
+                "tavily_enrichment",
+            )
             .await;
         let merged = merge_sources(response.sources, extra_sources);
         let sources_count = merged.len();
-        self.cache.lock().await.set(session_id.clone(), merged);
+        self.cache
+            .lock()
+            .await
+            .set(session_id.clone(), merged.clone());
 
         Ok(WebSearchOutput {
             session_id,
             content: response.content,
             sources_count,
+            sources: merged,
             search_provider: "grok_responses".to_string(),
             fallback_used: false,
             fallback_reason: None,
@@ -225,6 +256,7 @@ impl SearchService {
         &self,
         query: &str,
         count: usize,
+        filters: &SearchFilters,
         primary_provider: &str,
     ) -> Vec<Source> {
         if count == 0 {
@@ -233,7 +265,7 @@ impl SearchService {
 
         if let Some(provider) = &self.sources {
             let sources = provider
-                .search_sources(query, count)
+                .search_sources(query, count, filters)
                 .await
                 .unwrap_or_default();
             if !sources.is_empty() {
@@ -243,7 +275,7 @@ impl SearchService {
 
         if let Some(provider) = &self.fallback_sources {
             let sources = provider
-                .search_sources(query, count)
+                .search_sources(query, count, filters)
                 .await
                 .unwrap_or_default();
             if !sources.is_empty() {
@@ -261,10 +293,16 @@ impl SearchService {
         input: &WebSearchInput,
         reason: &str,
     ) -> Result<WebSearchOutput> {
+        let filters = SearchFilters {
+            recency_days: input.recency_days,
+            include_domains: input.include_domains.clone(),
+            exclude_domains: input.exclude_domains.clone(),
+        };
         let fallback_sources = self
             .search_extra_sources(
                 &input.query,
                 self.config.fallback_sources,
+                &filters,
                 "tavily_fallback",
             )
             .await;
@@ -272,15 +310,15 @@ impl SearchService {
         self.cache
             .lock()
             .await
-            .set(session_id.clone(), fallback_sources);
+            .set(session_id.clone(), fallback_sources.clone());
 
         let content = if response.content.trim().is_empty() {
             format!(
-                "Grok Responses search did not return a verifiable answer. Source fallback returned {sources_count} source(s)."
+                "Grok Responses search did not return a verifiable answer. Source fallback returned {sources_count} source(s); evaluate them directly rather than treating any text as a verified answer."
             )
         } else {
             format!(
-                "Grok Responses returned an answer without verifiable search sources, so source fallback returned {sources_count} source(s). Original Grok answer was not treated as verified."
+                "Grok Responses returned an answer without verifiable search sources, so source fallback returned {sources_count} source(s). Original Grok answer was not treated as verified; evaluate the listed sources directly."
             )
         };
 
@@ -288,6 +326,7 @@ impl SearchService {
             session_id,
             content,
             sources_count,
+            sources: fallback_sources,
             search_provider: "source_fallback".to_string(),
             fallback_used: true,
             fallback_reason: Some(reason.to_string()),
@@ -308,7 +347,13 @@ impl SearchService {
         })
     }
 
-    pub async fn web_fetch(&self, url: &str) -> Result<String> {
+    pub async fn web_fetch(&self, url: &str, max_chars: Option<usize>) -> Result<WebFetchOutput> {
+        let raw = self.web_fetch_raw(url).await?;
+        let effective_limit = max_chars.or(self.config.fetch_max_chars);
+        Ok(apply_fetch_limit(url, raw, effective_limit))
+    }
+
+    async fn web_fetch_raw(&self, url: &str) -> Result<String> {
         if let Some(provider) = &self.sources {
             if let Ok(content) = provider.fetch(url).await {
                 if !content.trim().is_empty() {
@@ -409,6 +454,19 @@ impl SearchService {
             content.push_str("\n\nFocus platform: ");
             content.push_str(platform);
         }
+        if let Some(days) = input.recency_days {
+            content.push_str(&format!(
+                "\n\nRestrict evidence to sources published within the last {days} day(s)."
+            ));
+        }
+        if !input.include_domains.is_empty() {
+            content.push_str("\n\nPrefer sources from: ");
+            content.push_str(&input.include_domains.join(", "));
+        }
+        if !input.exclude_domains.is_empty() {
+            content.push_str("\n\nDo not cite sources from: ");
+            content.push_str(&input.exclude_domains.join(", "));
+        }
         if !extra_sources.is_empty() {
             content.push_str("\n\nAdditional sources:\n");
             for source in extra_sources {
@@ -447,6 +505,27 @@ fn grok_unverifiable_reason(response: &SearchResponse) -> Option<&'static str> {
     None
 }
 
+fn apply_fetch_limit(url: &str, content: String, max_chars: Option<usize>) -> WebFetchOutput {
+    let original_length = content.chars().count();
+    match max_chars {
+        Some(limit) if original_length > limit => {
+            let truncated: String = content.chars().take(limit).collect();
+            WebFetchOutput {
+                url: url.to_string(),
+                content: truncated,
+                original_length,
+                truncated: true,
+            }
+        }
+        _ => WebFetchOutput {
+            url: url.to_string(),
+            content,
+            original_length,
+            truncated: false,
+        },
+    }
+}
+
 fn with_provider(mut sources: Vec<Source>, provider: &str) -> Vec<Source> {
     for source in &mut sources {
         source.provider = provider.to_string();
@@ -482,7 +561,8 @@ impl Probe {
 
 async fn probe_source(provider: &dyn SourceProvider, sample_url: &str) -> Probe {
     // Use a short keyword search as a lightweight liveness signal.
-    match provider.search_sources("ping", 1).await {
+    let filters = SearchFilters::default();
+    match provider.search_sources("ping", 1, &filters).await {
         Ok(_) => Probe::ok(format!("reachable (sample probe via {sample_url} ok)")),
         Err(err) => Probe::failed(err.to_string()),
     }
@@ -506,7 +586,12 @@ struct FakeSourceProvider;
 
 #[async_trait]
 impl SourceProvider for FakeSourceProvider {
-    async fn search_sources(&self, _query: &str, max_results: usize) -> Result<Vec<Source>> {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
         Ok((0..max_results)
             .map(|idx| {
                 Source::new(format!("https://example.com/source-{idx}"), "tavily")
