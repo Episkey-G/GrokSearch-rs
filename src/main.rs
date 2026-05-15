@@ -61,8 +61,7 @@ Required keys
 One-line install (Claude Code)
   claude mcp add-json grok-search-rs --scope user '{
     "type": "stdio",
-    "command": "npx",
-    "args": ["-y", "grok-search-rs"],
+    "command": "grok-search-rs",
     "env": {
       "GROK_SEARCH_API_KEY": "xai-...",
       "TAVILY_API_KEY": "tvly-..."
