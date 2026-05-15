@@ -152,7 +152,13 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
                 .and_then(Value::as_u64)
                 .unwrap_or(10) as usize;
             let sources = service.web_map(url, max_results).await?;
-            Ok(json!({ "url": url, "sources_count": sources.len(), "sources": sources }))
+            let mapped_sources: Vec<Value> = sources
+                .iter()
+                .map(|source| json!({ "url": &source.url, "provider": &source.provider }))
+                .collect();
+            Ok(
+                json!({ "url": url, "sources_count": mapped_sources.len(), "sources": mapped_sources }),
+            )
         }
         _ => Err(GrokSearchError::NotFound(format!("unknown tool: {name}"))),
     }
@@ -277,5 +283,41 @@ mod tests {
 
         assert_eq!(response["id"], 7);
         assert_eq!(response["result"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn web_map_returns_url_sources_without_search_metadata() {
+        let service = SearchService::fake_with_sources();
+        let response = handle_request(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "web_map",
+                    "arguments": {
+                        "url": "https://example.com",
+                        "max_results": 2
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("web_map response");
+
+        let output = &response["result"]["structuredContent"];
+        let sources = output["sources"].as_array().expect("sources");
+        assert_eq!(output["sources_count"], 2);
+        assert_eq!(
+            sources[0],
+            json!({
+                "url": "https://example.com/page-0",
+                "provider": "tavily"
+            })
+        );
+        assert!(sources[0].get("title").is_none());
+        assert!(sources[0].get("description").is_none());
+        assert!(sources[0].get("published_date").is_none());
     }
 }
