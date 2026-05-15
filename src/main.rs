@@ -1,6 +1,6 @@
 use std::io::{IsTerminal, Write};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cfg = grok_search_rs::config::Config::from_env();
 
