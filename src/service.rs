@@ -192,7 +192,11 @@ impl SearchService {
     }
 
     pub async fn web_search(&self, input: WebSearchInput) -> Result<WebSearchOutput> {
-        let session_id = Uuid::new_v4().simple().to_string()[..12].to_string();
+        let mut uuid_buf = [0u8; uuid::fmt::Simple::LENGTH];
+        let session_id = {
+            let encoded = Uuid::new_v4().simple().encode_lower(&mut uuid_buf);
+            encoded[..12].to_string()
+        };
         let effective_extra_sources = input
             .extra_sources
             .unwrap_or(self.config.default_extra_sources);
@@ -533,22 +537,42 @@ fn grok_unverifiable_reason(response: &SearchResponse) -> Option<&'static str> {
     None
 }
 
-fn apply_fetch_limit(url: &str, content: String, max_chars: Option<usize>) -> WebFetchOutput {
-    let original_length = content.chars().count();
-    match max_chars {
-        Some(limit) if original_length > limit => {
-            let truncated: String = content.chars().take(limit).collect();
-            WebFetchOutput {
-                url: url.to_string(),
-                content: truncated,
-                original_length,
-                truncated: true,
-            }
-        }
-        _ => WebFetchOutput {
+fn apply_fetch_limit(url: &str, mut content: String, max_chars: Option<usize>) -> WebFetchOutput {
+    let Some(limit) = max_chars else {
+        let original_length = content.chars().count();
+        return WebFetchOutput {
             url: url.to_string(),
             content,
             original_length,
+            truncated: false,
+        };
+    };
+
+    let mut count = 0usize;
+    let mut cutoff: Option<usize> = None;
+    for (byte_idx, _) in content.char_indices() {
+        if count == limit {
+            cutoff = Some(byte_idx);
+            break;
+        }
+        count += 1;
+    }
+
+    match cutoff {
+        Some(byte_idx) => {
+            let extra = content[byte_idx..].chars().count();
+            content.truncate(byte_idx);
+            WebFetchOutput {
+                url: url.to_string(),
+                content,
+                original_length: limit + extra,
+                truncated: true,
+            }
+        }
+        None => WebFetchOutput {
+            url: url.to_string(),
+            content,
+            original_length: count,
             truncated: false,
         },
     }
