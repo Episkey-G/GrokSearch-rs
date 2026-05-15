@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::model::source::Source;
 
@@ -6,7 +7,7 @@ use crate::model::source::Source;
 pub struct SourceCache {
     max_size: usize,
     order: VecDeque<String>,
-    values: HashMap<String, Vec<Source>>,
+    values: HashMap<String, Arc<Vec<Source>>>,
 }
 
 impl SourceCache {
@@ -18,7 +19,7 @@ impl SourceCache {
         }
     }
 
-    pub fn set(&mut self, session_id: String, sources: Vec<Source>) {
+    pub fn set(&mut self, session_id: String, sources: Arc<Vec<Source>>) {
         if self.values.contains_key(&session_id) {
             self.order.retain(|existing| existing != &session_id);
         }
@@ -32,7 +33,7 @@ impl SourceCache {
         }
     }
 
-    pub fn get(&mut self, session_id: &str) -> Option<Vec<Source>> {
+    pub fn get(&mut self, session_id: &str) -> Option<Arc<Vec<Source>>> {
         let sources = self.values.get(session_id).cloned()?;
         self.order.retain(|existing| existing != session_id);
         self.order.push_back(session_id.to_string());

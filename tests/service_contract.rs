@@ -327,3 +327,22 @@ async fn web_fetch_truncates_via_env_default() {
     assert_eq!(output.content.chars().count(), 5);
     assert_eq!(output.original_length, 16);
 }
+
+#[tokio::test]
+async fn get_sources_returns_same_payload_repeatedly() {
+    let service = SearchService::fake_with_sources();
+
+    let first = service
+        .web_search(WebSearchInput {
+            query: "ping".to_string(),
+            extra_sources: Some(2),
+            ..Default::default()
+        })
+        .await
+        .expect("search output");
+
+    let a = service.get_sources(&first.session_id).await.expect("a");
+    let b = service.get_sources(&first.session_id).await.expect("b");
+    assert_eq!(a.sources_count, b.sources_count);
+    assert_eq!(a.sources, b.sources);
+}

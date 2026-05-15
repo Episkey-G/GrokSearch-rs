@@ -236,17 +236,18 @@ impl SearchService {
             )
             .await;
         let merged = merge_sources(response.sources, extra_sources);
-        let sources_count = merged.len();
+        let merged_arc = Arc::new(merged);
+        let sources_count = merged_arc.len();
         self.cache
             .lock()
             .await
-            .set(session_id.clone(), merged.clone());
+            .set(session_id.clone(), merged_arc.clone());
 
         Ok(WebSearchOutput {
             session_id,
             content: response.content,
             sources_count,
-            sources: merged,
+            sources: Arc::try_unwrap(merged_arc).unwrap_or_else(|arc| (*arc).clone()),
             search_provider: "grok_responses".to_string(),
             fallback_used: false,
             fallback_reason: None,
@@ -307,11 +308,12 @@ impl SearchService {
                 "tavily_fallback",
             )
             .await;
-        let sources_count = fallback_sources.len();
+        let fallback_arc = Arc::new(fallback_sources);
+        let sources_count = fallback_arc.len();
         self.cache
             .lock()
             .await
-            .set(session_id.clone(), fallback_sources.clone());
+            .set(session_id.clone(), fallback_arc.clone());
 
         let content = if response.content.trim().is_empty() {
             format!(
@@ -327,7 +329,7 @@ impl SearchService {
             session_id,
             content,
             sources_count,
-            sources: fallback_sources,
+            sources: Arc::try_unwrap(fallback_arc).unwrap_or_else(|arc| (*arc).clone()),
             search_provider: "source_fallback".to_string(),
             fallback_used: true,
             fallback_reason: Some(reason.to_string()),
@@ -341,10 +343,11 @@ impl SearchService {
             .await
             .get(session_id)
             .ok_or_else(|| GrokSearchError::NotFound(format!("session_id={session_id}")))?;
+        let sources_count = sources.len();
         Ok(GetSourcesOutput {
             session_id: session_id.to_string(),
-            sources_count: sources.len(),
-            sources,
+            sources_count,
+            sources: Arc::try_unwrap(sources).unwrap_or_else(|arc| (*arc).clone()),
         })
     }
 
