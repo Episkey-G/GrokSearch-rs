@@ -96,20 +96,21 @@ impl SearchService {
             .grok_api_key
             .clone()
             .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?;
-        let ai: Arc<dyn AiProvider> = Arc::new(GrokResponsesProvider::new(
+        let http = crate::providers::http::build_client(config.timeout);
+        let ai: Arc<dyn AiProvider> = Arc::new(GrokResponsesProvider::with_client(
+            http.clone(),
             config.grok_api_url.clone(),
             grok_key,
             config.web_search_enabled,
             config.x_search_enabled,
-            config.timeout,
         ));
 
         let sources = if config.tavily_enabled {
             config.tavily_api_key.clone().map(|key| {
-                Arc::new(TavilyProvider::new(
+                Arc::new(TavilyProvider::with_client(
+                    http.clone(),
                     config.tavily_api_url.clone(),
                     key,
-                    config.timeout,
                 )) as Arc<dyn SourceProvider>
             })
         } else {
@@ -118,10 +119,10 @@ impl SearchService {
 
         let fallback_sources = if config.firecrawl_enabled {
             config.firecrawl_api_key.clone().map(|key| {
-                Arc::new(FirecrawlProvider::new(
+                Arc::new(FirecrawlProvider::with_client(
+                    http.clone(),
                     config.firecrawl_api_url.clone(),
                     key,
-                    config.timeout,
                 )) as Arc<dyn SourceProvider>
             })
         } else {

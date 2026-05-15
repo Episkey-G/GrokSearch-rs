@@ -17,8 +17,18 @@ pub struct TavilyProvider {
 
 impl TavilyProvider {
     pub fn new(api_url: impl Into<String>, api_key: impl Into<String>, timeout: Duration) -> Self {
+        Self::with_client(build_client(timeout), api_url, api_key)
+    }
+
+    /// Construct with an externally provided `reqwest::Client`. Used by
+    /// `SearchService::new` to share one tuned client across providers.
+    pub fn with_client(
+        client: Client,
+        api_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         Self {
-            client: build_client(timeout),
+            client,
             api_url: api_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
