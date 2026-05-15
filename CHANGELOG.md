@@ -2,7 +2,21 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
-## 0.1.8 - 2026-05-15
+## 0.1.9 - 2026-05-16
+
+### Added
+
+- 全局配置文件支持：`~/.config/grok-search-rs/config.toml` 一次设定，所有 MCP 客户端共享，免去逐个 client 重复填 `env`。路径可由 `GROK_SEARCH_CONFIG=/abs/path` 覆盖。
+- 优先级链：**进程 env > 配置文件 > 内置默认**，per-client `env` 仍可临时覆写文件设置。
+- 配置文件支持全部 16 个键（`grok_api_key` / `grok_model` / `tavily_api_key` / `firecrawl_api_key` / `default_extra_sources` / `timeout_seconds` / …），键名为对应 env 变量的 snake_case 形式；未知键会被拒绝，杜绝拼写错误静默丢失。
+- 新增 `grok-search-rs --init` 子命令：幂等地写入带注释的模板到解析后的配置路径，所有键默认注释掉——空模板与"无配置文件"等价，绝不静默覆盖默认值。
+- 交互式 onboarding（直接执行二进制时）：检测到配置文件缺失时，自动追加 `--init` 提示。
+- 新增 `Config::load_from(env_map)`、`config::config_path()`、`config::write_template(path)` 公共 API。
+
+### Internal
+
+- 新增 `toml = "0.8"` 依赖（仅 `parse` feature，约 4 个传递 crate）。
+- 配置加载新增 6 条集成测试：文件供值、env 覆盖、文件缺失、全键映射、`--init` 幂等性、空模板不改默认行为。
 
 ### Performance
 

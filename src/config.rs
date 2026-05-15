@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -21,7 +24,109 @@ pub struct Config {
     pub timeout: Duration,
 }
 
+/// Mirror of `Config` for TOML deserialization. All fields optional so users
+/// only need to set what they care about. Field names map 1:1 to TOML keys.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct ConfigFile {
+    grok_api_url: Option<String>,
+    grok_api_key: Option<String>,
+    grok_model: Option<String>,
+    web_search_enabled: Option<bool>,
+    x_search_enabled: Option<bool>,
+    tavily_api_url: Option<String>,
+    tavily_api_key: Option<String>,
+    tavily_enabled: Option<bool>,
+    firecrawl_api_url: Option<String>,
+    firecrawl_api_key: Option<String>,
+    firecrawl_enabled: Option<bool>,
+    default_extra_sources: Option<usize>,
+    fallback_sources: Option<usize>,
+    fetch_max_chars: Option<usize>,
+    cache_size: Option<usize>,
+    timeout_seconds: Option<u64>,
+}
+
+impl ConfigFile {
+    /// Translate file fields into the env-style key/value map the rest of the
+    /// loader consumes. Keeps a single precedence pipeline.
+    fn into_env_map(self) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let mut insert = |key: &str, value: Option<String>| {
+            if let Some(v) = value {
+                out.insert(key.to_string(), v);
+            }
+        };
+        insert("GROK_SEARCH_URL", self.grok_api_url);
+        insert("GROK_SEARCH_API_KEY", self.grok_api_key);
+        insert("GROK_SEARCH_MODEL", self.grok_model);
+        insert(
+            "GROK_SEARCH_WEB_SEARCH",
+            self.web_search_enabled.map(|b| b.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_X_SEARCH",
+            self.x_search_enabled.map(|b| b.to_string()),
+        );
+        insert("TAVILY_API_URL", self.tavily_api_url);
+        insert("TAVILY_API_KEY", self.tavily_api_key);
+        insert("TAVILY_ENABLED", self.tavily_enabled.map(|b| b.to_string()));
+        insert("FIRECRAWL_API_URL", self.firecrawl_api_url);
+        insert("FIRECRAWL_API_KEY", self.firecrawl_api_key);
+        insert(
+            "FIRECRAWL_ENABLED",
+            self.firecrawl_enabled.map(|b| b.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_EXTRA_SOURCES",
+            self.default_extra_sources.map(|n| n.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_FALLBACK_SOURCES",
+            self.fallback_sources.map(|n| n.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_FETCH_MAX_CHARS",
+            self.fetch_max_chars.map(|n| n.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_CACHE_SIZE",
+            self.cache_size.map(|n| n.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_TIMEOUT_SECONDS",
+            self.timeout_seconds.map(|n| n.to_string()),
+        );
+        out
+    }
+}
+
 impl Config {
+    /// Load config with full precedence chain: process env > config file > defaults.
+    /// Config file path: `$GROK_SEARCH_CONFIG` if set, else `~/.config/grok-search-rs/config.toml`.
+    /// Missing or unparseable files are skipped silently (env-only mode).
+    pub fn load() -> Self {
+        Self::load_from(std::env::vars())
+    }
+
+    /// Same as `load`, but uses a caller-supplied env map. Lets tests exercise
+    /// the file + env merge without mutating process-global env state.
+    pub fn load_from<I, K, V>(env_vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let env_map: HashMap<String, String> = env_vars
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let file_map = resolve_config_path(&env_map)
+            .and_then(|path| load_file_map(&path))
+            .unwrap_or_default();
+        Self::from_env_map(merge_env_over_file(file_map, env_map))
+    }
+
     pub fn from_env() -> Self {
         Self::from_env_map(std::env::vars())
     }
@@ -80,6 +185,109 @@ impl Config {
             self.timeout.as_secs()
         )
     }
+}
+
+fn resolve_config_path(env: &HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(explicit) = env.get("GROK_SEARCH_CONFIG").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(explicit));
+    }
+    let home = env.get("HOME").filter(|v| !v.is_empty())?;
+    Some(
+        Path::new(home)
+            .join(".config")
+            .join("grok-search-rs")
+            .join("config.toml"),
+    )
+}
+
+/// Resolved config file path using process env (`$GROK_SEARCH_CONFIG` or
+/// `~/.config/grok-search-rs/config.toml`). `None` when `HOME` is unset and no
+/// explicit path is provided.
+pub fn config_path() -> Option<PathBuf> {
+    let env: HashMap<String, String> = std::env::vars().collect();
+    resolve_config_path(&env)
+}
+
+/// Outcome of a `--init` scaffold attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitOutcome {
+    Created,
+    AlreadyExists,
+}
+
+/// Idempotent template writer used by `grok-search-rs --init`. Returns
+/// `AlreadyExists` without touching the file when it already exists; otherwise
+/// creates parent dirs and writes the annotated template (all keys commented).
+pub fn write_template(path: &Path) -> std::io::Result<InitOutcome> {
+    if path.exists() {
+        return Ok(InitOutcome::AlreadyExists);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, CONFIG_TEMPLATE)?;
+    Ok(InitOutcome::Created)
+}
+
+/// Embedded TOML template. All keys are commented so an empty scaffold cannot
+/// silently override built-in defaults; the user uncomments only what they need.
+pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
+# Path: ~/.config/grok-search-rs/config.toml  (or $GROK_SEARCH_CONFIG)
+#
+# Precedence: process env > this file > built-in defaults.
+# All keys below are commented out; uncomment and fill what you need.
+# Unknown keys are rejected — typos surface as errors, not silent drops.
+
+# ── Required ──────────────────────────────────────────────────
+# grok_api_key   = "xai-..."          # xAI / Grok key   https://x.ai/api
+# tavily_api_key = "tvly-..."         # Tavily key       https://tavily.com
+
+# ── Common knobs ──────────────────────────────────────────────
+# grok_model         = "grok-4-1-fast-reasoning"
+# x_search_enabled   = false          # Grok X/Twitter search tool
+# firecrawl_api_key  = "fc-..."       # Optional fetch fallback   https://firecrawl.dev
+
+# ── Endpoints (only set when using a self-hosted gateway) ─────
+# grok_api_url      = "https://api.x.ai"
+# tavily_api_url    = "https://api.tavily.com"
+# firecrawl_api_url = "https://api.firecrawl.dev"
+
+# ── Feature toggles ───────────────────────────────────────────
+# web_search_enabled = true
+# tavily_enabled     = true
+# firecrawl_enabled  = true
+
+# ── Behavior tuning ───────────────────────────────────────────
+# default_extra_sources = 3
+# fallback_sources      = 5
+# fetch_max_chars       = 200000      # per-request char cap on web_fetch
+# cache_size            = 256
+# timeout_seconds       = 60
+"#;
+
+fn load_file_map(path: &Path) -> Option<HashMap<String, String>> {
+    let body = std::fs::read_to_string(path).ok()?;
+    match toml::from_str::<ConfigFile>(&body) {
+        Ok(file) => Some(file.into_env_map()),
+        Err(err) => {
+            eprintln!(
+                "grok-search-rs: ignoring malformed config {}: {}",
+                path.display(),
+                err
+            );
+            None
+        }
+    }
+}
+
+fn merge_env_over_file(
+    mut base: HashMap<String, String>,
+    overlay: HashMap<String, String>,
+) -> HashMap<String, String> {
+    for (k, v) in overlay {
+        base.insert(k, v);
+    }
+    base
 }
 
 fn get(map: &HashMap<String, String>, key: &str, default: &str) -> String {

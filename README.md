@@ -170,6 +170,8 @@ Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-s
 
 > ⚠️ `grok-search-rs` / `npx grok-search-rs` is **not meant to be launched directly**. It speaks MCP over stdio — your client launches it. Running it in a terminal prints an onboarding guide.
 
+> 💡 **Multiple clients?** Run `grok-search-rs --init` once to set keys globally. See [Global config file](#-global-config-file-set-once-reuse-across-clients).
+
 ---
 
 ## 🪄 Install via AI prompt
@@ -295,7 +297,29 @@ FIRECRAWL_API_KEY=fc-...        # optional
 GROK_SEARCH_X_SEARCH=true       # optional
 ```
 
-Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+### 🗂 Global config file (set once, reuse across clients)
+
+Tired of duplicating `env` blocks in every client's MCP config? Run `grok-search-rs --init` to scaffold `~/.config/grok-search-rs/config.toml`, fill in your keys, and every client can shrink to just `{"command": "grok-search-rs"}`.
+
+```bash
+grok-search-rs --init       # scaffold template (idempotent, never overwrites)
+$EDITOR ~/.config/grok-search-rs/config.toml
+```
+
+**Path** (auto‑detected):
+
+1. `$GROK_SEARCH_CONFIG` — explicit override path.
+2. `~/.config/grok-search-rs/config.toml` — default.
+
+**Precedence**: client `env` block **>** config file **>** built‑in defaults. So a per‑client `env` can still override the file when you want a one‑off model.
+
+After this, your client config can shrink to just the command:
+
+```json
+{ "command": "grok-search-rs" }
+```
+
+> File keys use lowercase `snake_case` (env `GROK_SEARCH_MODEL` → file `grok_model`). Unknown keys are rejected. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
