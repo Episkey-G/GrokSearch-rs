@@ -2,6 +2,38 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.8 - 2026-05-15
+
+### Performance
+
+- `web_search` 改为投机并发：`tokio::join!` 同时发起 Grok 与 Tavily 检索，总延迟由 `sum(Grok, Tavily)` 降为 `≈ max(Grok, Tavily)`；通过 `count = max(extra_sources, fallback_sources)` 一次取够、按路径裁剪复用，**保持"每次 web_search 仅一次源 provider 调用"契约**。
+- 三家 provider（Grok / Tavily / Firecrawl）共享单个 `reqwest::Client`，启用 `gzip`、`pool_idle_timeout=90s`、`tcp_keepalive=60s`、`tcp_nodelay`；TLS 会话与连接池跨 host 复用。
+- HTTP 响应解析切 `bytes()` + `serde_json::from_slice`，省去一次完整 UTF-8 校验扫描。
+- `apply_fetch_limit` 改单次 `char_indices` 截断，UTF-8 文本由三遍扫描压到一遍。
+- `Source.provider` 字段由 `String` 切 `Cow<'static, str>`：所有内部标签都是 `'static`，逐源省去一次堆分配。
+- `SourceCache` 内部存 `Arc<Vec<Source>>`：cache get/set 在 mutex 内仅做引用计数，临界区由 O(N) 深拷降为 O(1)。
+- Tavily search 请求体改 serde 派生结构体：消除 `json! + as_object_mut + insert` 多次临时 String 分配。
+- `session_id` 编码改栈缓冲（`uuid::fmt::Simple::encode_lower` 写 `[u8; 32]`），省两次 String 分配。
+
+### Changed
+
+- tokio runtime flavor 由 `multi_thread` 切 `current_thread`：MCP stdio 服务本就单流，去掉 N 个 worker 线程降低稳态 RSS（预期 0.3~0.8 MB）。
+- `[profile.release]` 启用 `panic = "abort"`：移除 unwind 表，release 二进制由 3.0 MB 降至 **2.5 MB（−16.6%）**。
+- `reqwest` 启用 `gzip` feature。
+
+### Internal
+
+- 新增 `GrokResponsesProvider::with_client` / `TavilyProvider::with_client` / `FirecrawlProvider::with_client` 构造路径，旧 `new(.., timeout)` 签名保留以兼容下游集成。
+- 新增 `RawSourceOrigin` 枚举与 `enrichment_label` / `fallback_label` 自由函数，把"取源"与"打路径标签"解耦。
+- 测试新增 3 条契约：`get_sources_returns_same_payload_repeatedly`、`web_search_speculation_serves_enrichment_with_one_source_call`、`source_provider_field_accepts_static_str_via_cow`。
+
+### Verified
+
+- `cargo test --all`：34 passed / 0 failed
+- `cargo clippy --all-targets -- -D warnings`：零警告
+- MCP stdio 烟测：`initialize` + `tools/list` 协议握手通过，五工具齐全
+- 所有公共 MCP tool 输入 / 输出 schema **零变更**
+
 ## 0.1.7 - 2026-05-15
 
 ### Added
