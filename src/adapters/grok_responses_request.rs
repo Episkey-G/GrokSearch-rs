@@ -45,6 +45,7 @@ pub fn to_grok_responses_payload(
     Ok(json!({
         "model": req.model,
         "input": input,
-        "tools": tools
+        "tools": tools,
+        "stream": false
     }))
 }
