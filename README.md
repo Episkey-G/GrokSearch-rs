@@ -1,28 +1,25 @@
 # GrokSearch-rs
 
-![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
+GrokSearch-rs product banner
 
-<p align="center">
-  <b>A lightweight Rust MCP server bundling Grok web search + Tavily fetch/map + Firecrawl fallback.</b>
-</p>
+**A lightweight Rust MCP server bundling Grok web search + Tavily fetch/map + Firecrawl fallback.**
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/grok-search-rs"><img src="https://img.shields.io/npm/v/grok-search-rs?label=npm&color=informational" alt="npm"></a>
-  <a href="https://github.com/Episkey-G/GrokSearch-rs/releases"><img src="https://img.shields.io/github/v/release/Episkey-G/GrokSearch-rs?display_name=tag&sort=semver" alt="release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Episkey-G/GrokSearch-rs" alt="license"></a>
-</p>
+
 
 ---
 
 > Drop one MCP server into Claude / Codex / Gemini / Cursor / VS Code / Windsurf and your assistant gets **Grok‑powered search**, **structured fetch**, and **site mapping**.
 
+`grok-search-rs` is an **MCP server** — your client launches it over stdio, not HTTP.
+
 ## ✨ Features
 
 - 🔎 **Grok Responses search** — concise answer + cited sources, cached for follow‑ups.
-- 📥 **Tavily fetch / map** — full‑text extract and link discovery with one call.
-- 🛟 **Firecrawl fallback** — when Tavily refuses or returns thin content.
-- 🩺 **Doctor probe** — `doctor` tool reports connectivity + redacted config in seconds.
-- 📦 **One‑line install** — `npm install -g grok-search-rs` for the lean native binary; `npx grok-search-rs` also works (keeps Node resident as a stdio shim).
+- 📥 **Tavily fetch / map** — full‑text extract and link discovery.
+- 🛟 **Firecrawl fallback** — kicks in when Tavily refuses or returns thin content.
+- 🐦 **Optional X/Twitter search** — one env var to add `x_search`.
+- 🩺 **Doctor probe** — connectivity + redacted config in one tool call.
+- 📦 **One‑line install** — `npm install -g grok-search-rs`.
 
 ---
 
@@ -30,24 +27,23 @@
 
 You need at least:
 
-| Key | Required | Where to get it |
-| --- | --- | --- |
-| `GROK_SEARCH_API_KEY` | ✅ | <https://x.ai/api> (any Grok‑compatible endpoint works) |
-| `TAVILY_API_KEY`      | ✅ | <https://tavily.com> |
-| `FIRECRAWL_API_KEY`   | optional | <https://firecrawl.dev> (fetch fallback) |
+
+| Key                   | Required | Where to get it                                                           |
+| --------------------- | -------- | ------------------------------------------------------------------------- |
+| `GROK_SEARCH_API_KEY` | ✅        | [https://x.ai/api](https://x.ai/api) (any Grok‑compatible endpoint works) |
+| `TAVILY_API_KEY`      | ✅        | [https://tavily.com](https://tavily.com)                                  |
+| `FIRECRAWL_API_KEY`   | optional | [https://firecrawl.dev](https://firecrawl.dev) (fetch fallback)           |
+
 
 > 💡 **Recommended**: install once globally, then point your MCP client at the native binary directly. This skips the Node `npx` wrapper (~30–50 MB resident) and gives you the true single‑digit‑MB Rust process.
 >
 > ```bash
 > npm install -g grok-search-rs
-> which grok-search-rs   # macOS / Linux — copy the printed path
-> # Windows: where grok-search-rs
 > ```
 
 Pick your client:
 
-<details open>
-<summary><b>Claude Code</b> — one command (recommended, native binary)</summary>
+**Claude Code** — one command (recommended, native binary)
 
 ```bash
 claude mcp add-json grok-search-rs --scope user '{
@@ -74,10 +70,9 @@ claude mcp add-json grok-search-rs --scope user '{
 }'
 ```
 
-</details>
 
-<details>
-<summary><b>Codex CLI</b> — edit <code>~/.codex/config.toml</code></summary>
+
+**Codex CLI** — edit `~/.codex/config.toml`
 
 Recommended (native binary):
 
@@ -96,10 +91,9 @@ args = ["-y", "grok-search-rs"]
 env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 ```
 
-</details>
 
-<details>
-<summary><b>Gemini CLI</b> — edit <code>~/.gemini/settings.json</code></summary>
+
+**Gemini CLI** — edit `~/.gemini/settings.json`
 
 ```json
 {
@@ -117,10 +111,9 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 
 Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-search-rs"]` if you'd rather not install globally.
 
-</details>
 
-<details>
-<summary><b>Cursor</b> — edit <code>~/.cursor/mcp.json</code> (or project <code>.cursor/mcp.json</code>)</summary>
+
+**Cursor** — edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`)
 
 ```json
 {
@@ -136,10 +129,9 @@ Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-s
 }
 ```
 
-</details>
 
-<details>
-<summary><b>VS Code</b> — <code>.vscode/mcp.json</code></summary>
+
+**VS Code** — `.vscode/mcp.json`
 
 ```json
 {
@@ -156,10 +148,9 @@ Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-s
 }
 ```
 
-</details>
 
-<details>
-<summary><b>Windsurf</b> — <code>~/.codeium/windsurf/mcp_config.json</code></summary>
+
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`
 
 ```json
 {
@@ -175,7 +166,7 @@ Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-s
 }
 ```
 
-</details>
+
 
 > ⚠️ `grok-search-rs` / `npx grok-search-rs` is **not meant to be launched directly**. It speaks MCP over stdio — your client launches it. Running it in a terminal prints an onboarding guide.
 
@@ -191,68 +182,120 @@ Install the grok-search-rs MCP server (npx -y grok-search-rs) into my current cl
 
 ---
 
-## 🧰 Tools
+## 🧰 MCP Tools
 
-| Tool | When to call it |
-| --- | --- |
-| `web_search`  | Concise sourced summary for a topic. Cache stores the source list for follow‑ups. |
-| `get_sources` | Pull the full source URLs/snippets of a previous `web_search`. |
-| `web_fetch`   | Need the *actual* page content — quotes, exact numbers, technical detail. Tavily Extract, falls back to Firecrawl. |
-| `web_map`     | Discover URLs on a domain via Tavily Map. Returns `{url, provider}` only. |
-| `doctor`      | Live connectivity probe + redacted config dump. Use it first when something looks off. |
 
-Rule of thumb: **`web_search` returns answer + sources inline every call; use `web_fetch` for exact evidence and `web_map` for URL discovery. `get_sources` only re-fetches an earlier session's cache.**
+| Tool          | When to call it                                                                      |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `web_search`  | Sourced summary for a topic. Sources are cached for follow‑ups.                      |
+| `get_sources` | Re‑fetch sources of a previous `web_search` by `session_id`.                         |
+| `web_fetch`   | Page content — quotes, exact numbers, technical detail. Tavily → Firecrawl fallback. |
+| `web_map`     | Discover URLs on a domain via Tavily Map.                                            |
+| `doctor`      | Live connectivity probe + redacted config. Run first when something looks off.       |
 
-### Search modes — `web_search` vs `x_search`
 
-`grok-search-rs` enables Grok's **`web_search` tool by default** — every `web_search` MCP call hits the open web through Grok Responses and is supplemented by Tavily.
+---
 
-Grok's **`x_search` tool** (search inside X/Twitter) is **opt‑in** — set `GROK_SEARCH_X_SEARCH=true` to enable it alongside web search. Both tools are then offered to Grok and it picks per query.
+## 🌐 Upstream protocol
+
+
+| MCP tool     | Upstream              | Endpoint                              | Fallback                       |
+| ------------ | --------------------- | ------------------------------------- | ------------------------------ |
+| `web_search` | Grok (xAI‑compatible) | `POST {GROK_SEARCH_URL}/v1/responses` | Tavily / Firecrawl for sources |
+| `web_fetch`  | Tavily                | `POST {TAVILY_API_URL}/extract`       | Firecrawl `/v1/scrape`         |
+| `web_map`    | Tavily                | `POST {TAVILY_API_URL}/map`           | —                              |
+| `doctor`     | all three             | probes each                           | —                              |
+
+
+`grok-search-rs` always calls the **Responses API** (`/v1/responses`), not `/v1/chat/completions`. Your upstream must implement that endpoint and accept the `web_search` / `x_search` tool types.
+
+`GROK_SEARCH_URL` accepts the root URL, a `/v1` base, or a full endpoint — all normalized to `/v1` internally. Verified upstreams: **xAI** (`https://api.x.ai`, both tools), **Modelverse** (`https://api.modelverse.cn`, `x_search` depends on relay).
+
+---
+
+## 🔍 Search modes — `web_search` vs `x_search`
+
+Grok Responses exposes two search tool types; each can be toggled independently. The MCP tool name your client sees (`web_search`) stays the same.
+
+
+| Env var                  | Default | Effect                                            |
+| ------------------------ | ------- | ------------------------------------------------- |
+| `GROK_SEARCH_WEB_SEARCH` | `true`  | Offer Grok the `web_search` tool (open web).      |
+| `GROK_SEARCH_X_SEARCH`   | `false` | Offer Grok the `x_search` tool (X/Twitter posts). |
+
+
+When both are on, Grok picks per query — factual queries lean web, "what are people on X saying…" leans X.
 
 ```bash
-# Default — web only
-GROK_SEARCH_WEB_SEARCH=true   # already the default, shown for clarity
-GROK_SEARCH_X_SEARCH=false    # default
-
-# Enable X/Twitter search in addition to the open web
-GROK_SEARCH_X_SEARCH=true
+GROK_SEARCH_X_SEARCH=true   # enable X search
 ```
 
-> Note: `x_search` requires your Grok endpoint / upstream proxy to actually expose the `x_search` tool type. xAI's official API does; some relays may strip it.
+Restart your MCP client, then verify with `doctor` (`x_search_enabled: true`).
+
+> ⚠️ `x_search` requires the upstream to expose the `x_search` tool type. xAI's official API does; some relays strip it.
 
 ---
 
 ## ⚙️ Configuration
 
-Minimal `.env` (if running the binary yourself):
+All config is via env vars, grouped by upstream.
+
+### Grok Responses (required)
+
+
+| Variable                 | Default                   | Purpose                            |
+| ------------------------ | ------------------------- | ---------------------------------- |
+| `GROK_SEARCH_API_KEY`    | — *(required)*            | Bearer token for the Grok gateway. |
+| `GROK_SEARCH_URL`        | `https://api.x.ai`        | Root, `/v1`, or full‑endpoint URL. |
+| `GROK_SEARCH_MODEL`      | `grok-4-1-fast-reasoning` | Model name.                        |
+| `GROK_SEARCH_WEB_SEARCH` | `true`                    | Offer `web_search` to Grok.        |
+| `GROK_SEARCH_X_SEARCH`   | `false`                   | Offer `x_search` to Grok.          |
+
+
+### Tavily (required for `web_fetch` / `web_map`)
+
+
+| Variable                       | Default                  | Purpose                                                  |
+| ------------------------------ | ------------------------ | -------------------------------------------------------- |
+| `TAVILY_API_KEY`               | — *(required)*           | Tavily key.                                              |
+| `TAVILY_API_URL`               | `https://api.tavily.com` | Tavily base.                                             |
+| `TAVILY_ENABLED`               | `true`                   | Force‑disable even with a key.                           |
+| `GROK_SEARCH_EXTRA_SOURCES`    | `3`                      | Extra Tavily sources after a Grok answer (`0` disables). |
+| `GROK_SEARCH_FALLBACK_SOURCES` | `5`                      | Fallback source count when Grok can't verify itself.     |
+
+
+### Firecrawl (optional fallback)
+
+
+| Variable            | Default                     | Purpose                                    |
+| ------------------- | --------------------------- | ------------------------------------------ |
+| `FIRECRAWL_API_KEY` | unset                       | Enables Firecrawl as `web_fetch` fallback. |
+| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base.                            |
+| `FIRECRAWL_ENABLED` | `true`                      | Force‑disable even with a key.             |
+
+
+### Runtime
+
+
+| Variable                      | Default | Purpose                                                          |
+| ----------------------------- | ------- | ---------------------------------------------------------------- |
+| `GROK_SEARCH_CACHE_SIZE`      | `256`   | Max cached `web_search` sessions.                                |
+| `GROK_SEARCH_TIMEOUT_SECONDS` | `60`    | HTTP timeout for all upstreams.                                  |
+| `GROK_SEARCH_FETCH_MAX_CHARS` | unset   | Default char cap on `web_fetch`; per‑call `max_chars` overrides. |
+
+
+> Boolean env vars: `1` / `true` / `yes` = on; anything else = off.
+
+### Minimal `.env`
 
 ```bash
 GROK_SEARCH_API_KEY=xai-...
-GROK_SEARCH_URL=https://api.x.ai
-GROK_SEARCH_MODEL=grok-4-1-fast-reasoning
 TAVILY_API_KEY=tvly-...
-
-# Optional: Firecrawl fallback for fetch.
-FIRECRAWL_API_KEY=fc-...
+FIRECRAWL_API_KEY=fc-...        # optional
+GROK_SEARCH_X_SEARCH=true       # optional
 ```
 
-Optional knobs:
-
-```bash
-GROK_SEARCH_WEB_SEARCH=true
-GROK_SEARCH_X_SEARCH=false
-GROK_SEARCH_EXTRA_SOURCES=3
-GROK_SEARCH_FALLBACK_SOURCES=5
-GROK_SEARCH_TIMEOUT_SECONDS=60
-GROK_SEARCH_CACHE_SIZE=256
-
-TAVILY_API_URL=https://api.tavily.com
-FIRECRAWL_API_URL=https://api.firecrawl.dev
-```
-
-`GROK_SEARCH_URL` accepts a root URL or a `/v1` URL — the server calls `/v1/responses` automatically.
-
-Full list: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
@@ -301,9 +344,7 @@ More docs:
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/?repos=Episkey-G%2FGrokSearch-rs&type=Date">
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" />
-</a>
+
 
 ## 🙏 Acknowledgements
 
