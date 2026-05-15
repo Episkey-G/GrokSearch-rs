@@ -88,31 +88,32 @@ pub fn tavily_search_request_body(
     max_results: usize,
     filters: &SearchFilters,
 ) -> Value {
-    let mut body = json!({
-        "query": query,
-        "max_results": max_results,
-        "include_answer": false,
-    });
-    let map = body
-        .as_object_mut()
-        .expect("tavily search body must be object");
-    if let Some(days) = filters.recency_days {
-        map.insert("days".to_string(), json!(days));
-        map.insert("topic".to_string(), json!("news"));
+    #[derive(serde::Serialize)]
+    struct TavilySearchBody<'a> {
+        query: &'a str,
+        max_results: usize,
+        include_answer: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        days: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        topic: Option<&'static str>,
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        include_domains: &'a [String],
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        exclude_domains: &'a [String],
     }
-    if !filters.include_domains.is_empty() {
-        map.insert(
-            "include_domains".to_string(),
-            json!(filters.include_domains),
-        );
-    }
-    if !filters.exclude_domains.is_empty() {
-        map.insert(
-            "exclude_domains".to_string(),
-            json!(filters.exclude_domains),
-        );
-    }
-    body
+
+    let body = TavilySearchBody {
+        query,
+        max_results,
+        include_answer: false,
+        days: filters.recency_days,
+        topic: filters.recency_days.map(|_| "news"),
+        include_domains: filters.include_domains.as_slice(),
+        exclude_domains: filters.exclude_domains.as_slice(),
+    };
+
+    serde_json::to_value(&body).expect("tavily search body must serialize")
 }
 
 pub fn tavily_map_request_body(url: &str, max_results: usize) -> Value {
