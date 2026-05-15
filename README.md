@@ -156,7 +156,9 @@ env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
 
 Paste this into your AI assistant — it'll detect the client and wire up the config:
 
-> Install the **grok-search-rs** MCP server (`npx -y grok-search-rs`) into my current client, ask me for `GROK_SEARCH_API_KEY` and `TAVILY_API_KEY`, then call `doctor` to verify. Docs: <https://github.com/Episkey-G/GrokSearch-rs#readme>
+```text
+Install the grok-search-rs MCP server (npx -y grok-search-rs) into my current client, ask me for GROK_SEARCH_API_KEY and TAVILY_API_KEY, then call doctor to verify. Docs: https://github.com/Episkey-G/GrokSearch-rs#readme
+```
 
 ---
 
