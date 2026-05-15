@@ -344,7 +344,9 @@ More docs:
 
 ## ⭐ Star History
 
-
+<a href="https://www.star-history.com/?repos=Episkey-G%2FGrokSearch-rs&type=Date">
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" />
+</a>
 
 ## 🙏 Acknowledgements
 
