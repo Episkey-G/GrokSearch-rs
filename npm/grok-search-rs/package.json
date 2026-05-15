@@ -1,6 +1,6 @@
 {
   "name": "grok-search-rs",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Rust MCP server for Grok Responses web search, Tavily fetch/map, and Firecrawl fallback",
   "publishConfig": {
     "access": "public"
@@ -45,10 +45,10 @@
     "arm64"
   ],
   "optionalDependencies": {
-    "@epsiekygrr_zedxx/grok-search-rs-darwin-universal": "0.1.4",
-    "@epsiekygrr_zedxx/grok-search-rs-linux-x64": "0.1.4",
-    "@epsiekygrr_zedxx/grok-search-rs-linux-arm64": "0.1.4",
-    "@epsiekygrr_zedxx/grok-search-rs-win32-x64": "0.1.4",
-    "@epsiekygrr_zedxx/grok-search-rs-win32-arm64": "0.1.4"
+    "@epsiekygrr_zedxx/grok-search-rs-darwin-universal": "0.1.5",
+    "@epsiekygrr_zedxx/grok-search-rs-linux-x64": "0.1.5",
+    "@epsiekygrr_zedxx/grok-search-rs-linux-arm64": "0.1.5",
+    "@epsiekygrr_zedxx/grok-search-rs-win32-x64": "0.1.5",
+    "@epsiekygrr_zedxx/grok-search-rs-win32-arm64": "0.1.5"
   }
 }

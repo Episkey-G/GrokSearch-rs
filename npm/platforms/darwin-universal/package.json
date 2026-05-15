@@ -1,15 +1,24 @@
 {
   "name": "@epsiekygrr_zedxx/grok-search-rs-darwin-universal",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "macOS universal binary for grok-search-rs",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Episkey-G/GrokSearch-rs.git"
   },
-  "os": ["darwin"],
-  "cpu": ["x64", "arm64"],
-  "files": ["bin/grok-search-rs"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/grok-search-rs"
+  ],
   "preferUnplugged": true,
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -1,15 +1,23 @@
 {
   "name": "@epsiekygrr_zedxx/grok-search-rs-win32-arm64",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Windows arm64 binary for grok-search-rs",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Episkey-G/GrokSearch-rs.git"
   },
-  "os": ["win32"],
-  "cpu": ["arm64"],
-  "files": ["bin/grok-search-rs.exe"],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/grok-search-rs.exe"
+  ],
   "preferUnplugged": true,
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  }
 }
