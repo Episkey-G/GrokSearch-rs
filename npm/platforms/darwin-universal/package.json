@@ -1,6 +1,6 @@
 {
   "name": "@epsiekygrr_zedxx/grok-search-rs-darwin-universal",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "macOS universal binary for grok-search-rs",
   "license": "MIT",
   "repository": {
