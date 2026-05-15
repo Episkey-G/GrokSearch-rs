@@ -2,6 +2,12 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.10 - 2026-05-16
+
+### Fixed
+
+- `web_search` 在指向 OpenAI-Responses 兼容网关（LiteLLM / OneAPI / vLLM 等）时，因上游默认返回 SSE 流（`Content-Type: text/event-stream`，首字节 `e`），`post_json` 的 `serde_json::from_slice` 抛出 `invalid Grok Responses JSON: expected value at line 1 column 1`，导致 Grok 通道整体失败、回退到 Tavily-only 结果。修复：`to_grok_responses_payload` 在请求体显式声明 `"stream": false`，迫使兼容网关返回同步 JSON。xAI 官方 `/v1/responses` 不识别该字段会静默忽略，对官方端点零影响。感谢 @bigsuperangel（#1）。
+
 ## 0.1.9 - 2026-05-16
 
 ### Added
