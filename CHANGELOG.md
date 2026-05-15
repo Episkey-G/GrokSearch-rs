@@ -2,6 +2,12 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## 0.1.3 - 2026-05-15
+
+### Fixed
+
+- Aligned the npm launcher with `ace-tool-rs` by resolving the installed platform package directly and removing runtime GitHub release download fallback from MCP startup.
+
 ## 0.1.0 - 2026-05-14
 
 ### Added

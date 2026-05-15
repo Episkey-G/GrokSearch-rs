@@ -1,6 +1,6 @@
 {
   "name": "@epsiekygrr_zedxx/grok-search-rs-linux-arm64",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Linux arm64 binary for grok-search-rs",
   "license": "MIT",
   "repository": {
