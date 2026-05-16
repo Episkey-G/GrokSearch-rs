@@ -1,5 +1,7 @@
 # GrokSearch-rs
 
+![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
+
 **A lightweight Rust MCP server for Grok / OpenAI‑compatible web search, plus Tavily fetch/map and Firecrawl fallback.**
 
 `grok-search-rs` is an **MCP stdio server** — your client (Claude Code, Codex, Cursor, VS Code, …) launches it; you do not run it directly. It exposes one set of tools (`web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`) and supports two upstream transports so you can plug into either xAI's official API or any OpenAI‑compatible relay.
@@ -167,10 +169,18 @@ More docs:
 
 ---
 
+## ⭐ Star History
+
+<a href="https://www.star-history.com/?repos=Episkey-G%2FGrokSearch-rs&type=Date">
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" />
+</a>
+
+---
+
 ## Acknowledgements
 
 - Inspired by [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch) — the original Python implementation that pioneered the Grok + Tavily + Firecrawl combo this project rewrites in Rust.
-- The OpenAI‑compatible transport draws on [konbakuyomu/smartsearch](https://github.com/konbakuyomu/smartsearch) for the four‑path source extraction approach (OpenAI annotations / Perplexity citations / `search_sources` / inline markers).
+- Thanks to the [LinuxDo](https://linux.do) community for the discussions, feedback, and the prior art that inspired this rewrite.
 
 ## License
 
