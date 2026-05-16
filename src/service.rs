@@ -92,6 +92,13 @@ impl SourceProvider for FirecrawlProvider {
 pub struct SearchService {
     config: Config,
     ai: Arc<dyn AiProvider>,
+    /// Model name written into every `SearchRequest` produced by the service.
+    /// Resolved once from `config` at construction so each transport gets the
+    /// model it actually understands: `grok_model` for Responses, and
+    /// `openai_compatible_model` (falling back to `grok_model`) for the
+    /// chat-completions transport. Per-call overrides via `WebSearchInput.model`
+    /// still win.
+    default_model: String,
     sources: Option<Arc<dyn SourceProvider>>,
     fallback_sources: Option<Arc<dyn SourceProvider>>,
     cache: Arc<Mutex<SourceCache>>,
@@ -172,6 +179,7 @@ impl SearchService {
 
         Ok(Self {
             cache: Arc::new(Mutex::new(SourceCache::new(config.cache_size))),
+            default_model: resolve_default_model(&config),
             config,
             ai,
             sources,
@@ -186,6 +194,7 @@ impl SearchService {
         ]);
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
+            default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
             sources: Some(Arc::new(FakeSourceProvider)),
@@ -225,6 +234,7 @@ impl SearchService {
 
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
+            default_model: resolve_default_model(&config),
             config,
             ai: ai.unwrap_or_else(|| Arc::new(FakeAiProvider)),
             sources: Some(primary),
@@ -432,6 +442,7 @@ impl SearchService {
     /// Runtime diagnostics with live connectivity probes against each configured backend.
     /// Returns provider availability flags, masked config, and per-provider reachability.
     pub async fn doctor(&self) -> serde_json::Value {
+        use crate::config::Transport;
         let grok_probe = self.probe_grok().await;
         let tavily_probe = match &self.sources {
             Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
@@ -442,13 +453,39 @@ impl SearchService {
             None => Probe::skipped("FIRECRAWL_API_KEY not configured"),
         };
 
+        // Surface the AI transport that the service actually dispatches to so
+        // doctor() stays truthful when callers point us at an OpenAI-compatible
+        // gateway. The legacy "grok" node name is preserved for backward
+        // compatibility, but its fields are now sourced from `default_model`
+        // and the transport-appropriate API URL — never silently from
+        // `grok_model` / `grok_api_url` on the chat-completions path.
+        let (provider_label, ai_api_url, ai_x_search_enabled) = match self.config.transport {
+            Transport::Responses => (
+                "grok_responses",
+                self.config.grok_api_url.as_str(),
+                self.config.x_search_enabled,
+            ),
+            Transport::ChatCompletions => (
+                "openai_compatible",
+                self.config
+                    .openai_compatible_api_url
+                    .as_deref()
+                    .unwrap_or(""),
+                // x_search is silently ignored on the chat-completions transport
+                // (the gateway has no equivalent); report it as disabled rather
+                // than leaking a misleading config flag.
+                false,
+            ),
+        };
+
         serde_json::json!({
-            "provider": "grok_responses",
+            "provider": provider_label,
+            "transport": provider_label,
             "grok": {
-                "api_url": self.config.grok_api_url,
-                "model": self.config.grok_model,
+                "api_url": ai_api_url,
+                "model": self.default_model,
                 "web_search_enabled": self.config.web_search_enabled,
-                "x_search_enabled": self.config.x_search_enabled,
+                "x_search_enabled": ai_x_search_enabled,
                 "reachable": grok_probe.ok,
                 "detail": grok_probe.detail,
             },
@@ -480,7 +517,7 @@ impl SearchService {
             tools.push(SearchTool::web_search());
         }
         let request = SearchRequest {
-            model: self.config.grok_model.clone(),
+            model: self.default_model.clone(),
             system: None,
             messages: vec![SearchMessage {
                 role: "user".to_string(),
@@ -534,7 +571,7 @@ impl SearchService {
             model: input
                 .model
                 .clone()
-                .unwrap_or_else(|| self.config.grok_model.clone()),
+                .unwrap_or_else(|| self.default_model.clone()),
             system: Some("Answer concisely with factual claims grounded in web search sources. Prefer primary sources. If sources are weak or unavailable, say so.".to_string()),
             messages: vec![SearchMessage {
                 role: "user".to_string(),
@@ -550,6 +587,23 @@ enum RawSourceOrigin {
     None,
     Primary,
     Fallback,
+}
+
+/// Pick the model the active transport actually understands. Responses speaks
+/// Grok-native model names (`grok_model`); the chat-completions gateway speaks
+/// whatever `OPENAI_COMPATIBLE_MODEL` declares, falling back to `grok_model`
+/// only when the operator hasn't set one. Resolved once at service
+/// construction so every outgoing `SearchRequest` carries the right default
+/// — preventing the chat path from silently shipping a Grok-only ID.
+fn resolve_default_model(config: &Config) -> String {
+    use crate::config::Transport;
+    match config.transport {
+        Transport::Responses => config.grok_model.clone(),
+        Transport::ChatCompletions => config
+            .openai_compatible_model
+            .clone()
+            .unwrap_or_else(|| config.grok_model.clone()),
+    }
 }
 
 fn enrichment_label(origin: RawSourceOrigin) -> &'static str {
@@ -735,5 +789,99 @@ mod transport_dispatch_tests {
         // url missing -> falls back to Responses transport, which then needs
         // GROK_SEARCH_API_KEY which is also missing -> MissingConfig.
         assert!(SearchService::new(config).is_err());
+    }
+
+    #[test]
+    fn default_model_follows_chat_completions_when_compat_model_set() {
+        // Reproduces the regression: SearchService::build_search_request used
+        // to stamp `grok_model` into every SearchRequest, masking
+        // OPENAI_COMPATIBLE_MODEL on the chat-completions transport.
+        let config = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+            ("OPENAI_COMPATIBLE_MODEL", "gpt-4o-mini"),
+            ("GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
+        ]);
+        assert_eq!(config.transport, Transport::ChatCompletions);
+        assert_eq!(resolve_default_model(&config), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn default_model_falls_back_to_grok_model_when_compat_model_missing() {
+        let config = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+            ("GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
+        ]);
+        assert_eq!(config.transport, Transport::ChatCompletions);
+        assert_eq!(resolve_default_model(&config), "grok-4-1-fast-reasoning");
+    }
+
+    #[test]
+    fn default_model_uses_grok_model_on_responses_transport() {
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "xai-fake"),
+            ("GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
+            ("OPENAI_COMPATIBLE_MODEL", "gpt-4o-mini"),
+        ]);
+        assert_eq!(config.transport, Transport::Responses);
+        assert_eq!(resolve_default_model(&config), "grok-4-1-fast-reasoning");
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_openai_compatible_transport_fields() {
+        // Regression: doctor() used to hardcode "grok_responses" / grok_model /
+        // grok_api_url, masking what the service actually dispatches to on the
+        // chat-completions transport. Now it must reflect compat config.
+        let config = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://compat.example/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+            ("OPENAI_COMPATIBLE_MODEL", "gpt-4o-mini"),
+            ("GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
+            // X-search is silently ignored on this transport — doctor must
+            // report the effective behavior (false), not the raw env flag.
+            ("GROK_SEARCH_X_SEARCH", "true"),
+        ]);
+        assert_eq!(config.transport, Transport::ChatCompletions);
+
+        // Hand-build the service with fake AI to avoid any real HTTP from
+        // probe_grok during doctor().
+        let svc = SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            sources: None,
+            fallback_sources: None,
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+        };
+
+        let report = svc.doctor().await;
+        assert_eq!(report["provider"], "openai_compatible");
+        assert_eq!(report["transport"], "openai_compatible");
+        assert_eq!(report["grok"]["api_url"], "https://compat.example/v1");
+        assert_eq!(report["grok"]["model"], "gpt-4o-mini");
+        assert_eq!(report["grok"]["x_search_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn doctor_still_reports_grok_responses_on_responses_transport() {
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "xai-fake"),
+            ("GROK_SEARCH_MODEL", "grok-4-1-fast-reasoning"),
+        ]);
+        assert_eq!(config.transport, Transport::Responses);
+
+        let svc = SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            sources: None,
+            fallback_sources: None,
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+        };
+
+        let report = svc.doctor().await;
+        assert_eq!(report["provider"], "grok_responses");
+        assert_eq!(report["grok"]["model"], "grok-4-1-fast-reasoning");
     }
 }
