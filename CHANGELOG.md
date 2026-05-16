@@ -2,6 +2,18 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## Unreleased
+
+### Added
+
+- OpenAI-compatible chat/completions transport (`OPENAI_COMPATIBLE_API_URL` / `_KEY` / `_MODEL`). When `GROK_SEARCH_API_KEY` is unset and the new triple is set, the client talks to `/v1/chat/completions` instead of `/v1/responses`. Source extraction covers OpenAI annotations, Perplexity-style citations, top-level `search_sources`, and inline `[[n]](url)` markers.
+- `Config::transport` enum (`Responses` | `ChatCompletions`) decided at startup from the configured env-var groups.
+
+### Notes
+
+- `x_search_enabled` is silently ignored on the Chat-Completions transport (warned once at startup).
+- No new crates added.
+
 ## 0.1.10 - 2026-05-16
 
 ### Fixed

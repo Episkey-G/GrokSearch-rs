@@ -281,6 +281,15 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # tavily_api_url    = "https://api.tavily.com"
 # firecrawl_api_url = "https://api.firecrawl.dev"
 
+# ── OpenAI-compatible transport (alternative to grok_*) ───────
+# Set these three to use a /v1/chat/completions gateway. When grok_api_key
+# above is also set, it wins; otherwise these three pick the chat-completions
+# transport. Source extraction supports OpenAI annotations, Perplexity-style
+# citations, marybrown's top-level search_sources, and inline [[n]](url).
+# openai_compatible_api_url = "https://your-gateway/v1"
+# openai_compatible_api_key = "sk-..."
+# openai_compatible_model   = "grok-4.3-fast"
+
 # ── Feature toggles ───────────────────────────────────────────
 # web_search_enabled = true
 # tavily_enabled     = true
