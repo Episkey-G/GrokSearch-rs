@@ -1,361 +1,147 @@
 # GrokSearch-rs
 
-GrokSearch-rs product banner
+![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
 
-**A lightweight Rust MCP server bundling Grok web search + Tavily fetch/map + Firecrawl fallback.**
+**A lightweight Rust MCP server for Grok / OpenAI‑compatible web search, plus Tavily fetch/map and Firecrawl fallback.**
 
-
-
----
-
-> Drop one MCP server into Claude / Codex / Gemini / Cursor / VS Code / Windsurf and your assistant gets **Grok‑powered search**, **structured fetch**, and **site mapping**.
-
-`grok-search-rs` is an **MCP server** — your client launches it over stdio, not HTTP.
-
-## ✨ Features
-
-- 🔎 **Grok Responses search** — concise answer + cited sources, cached for follow‑ups.
-- 📥 **Tavily fetch / map** — full‑text extract and link discovery.
-- 🛟 **Firecrawl fallback** — kicks in when Tavily refuses or returns thin content.
-- 🐦 **Optional X/Twitter search** — one env var to add `x_search`.
-- 🩺 **Doctor probe** — connectivity + redacted config in one tool call.
-- 📦 **One‑line install** — `npm install -g grok-search-rs`.
+`grok-search-rs` is an **MCP stdio server** — your client (Claude Code, Codex, Cursor, VS Code, …) launches it; you do not run it directly. It exposes one set of tools (`web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`) and supports two upstream transports so you can plug into either xAI's official API or any OpenAI‑compatible relay.
 
 ---
 
-## 🚀 Install
+## Features
 
-You need at least:
+- 🔎 **Live web search** with cited sources, cached for follow‑up `get_sources` calls.
+- 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
+- 📥 **Tavily fetch / map** for full‑text extraction and link discovery, with **Firecrawl** as automatic fallback.
+- 🐦 **Optional X/Twitter search** via `x_search` (Responses transport only).
+- 🩺 **`doctor`** — connectivity probe + redacted config in one tool call.
+- 🗂 **Single global config file** so multiple MCP clients share one set of keys.
 
+---
 
-| Key                   | Required | Where to get it                                                           |
-| --------------------- | -------- | ------------------------------------------------------------------------- |
-| `GROK_SEARCH_API_KEY` | ✅        | [https://x.ai/api](https://x.ai/api) (any Grok‑compatible endpoint works) |
-| `TAVILY_API_KEY`      | ✅        | [https://tavily.com](https://tavily.com)                                  |
-| `FIRECRAWL_API_KEY`   | optional | [https://firecrawl.dev](https://firecrawl.dev) (fetch fallback)           |
-
-
-> 💡 **Recommended**: install once globally, then point your MCP client at the native binary directly. This skips the Node `npx` wrapper (~30–50 MB resident) and gives you the true single‑digit‑MB Rust process.
->
-> ```bash
-> npm install -g grok-search-rs
-> ```
-
-Pick your client:
-
-**Claude Code** — one command (recommended, native binary)
+## Install
 
 ```bash
-claude mcp add-json grok-search-rs --scope user '{
-  "type": "stdio",
-  "command": "grok-search-rs",
-  "env": {
-    "GROK_SEARCH_API_KEY": "xai-...",
-    "TAVILY_API_KEY": "tvly-..."
-  }
-}'
+npm install -g grok-search-rs
 ```
 
-Prefer `npx` (no global install, but Node stays resident):
-
-```bash
-claude mcp add-json grok-search-rs --scope user '{
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "grok-search-rs"],
-  "env": {
-    "GROK_SEARCH_API_KEY": "xai-...",
-    "TAVILY_API_KEY": "tvly-..."
-  }
-}'
-```
-
-
-
-**Codex CLI** — edit `~/.codex/config.toml`
-
-Recommended (native binary):
-
-```toml
-[mcp_servers.grok-search-rs]
-command = "grok-search-rs"
-env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
-```
-
-Or via npx:
-
-```toml
-[mcp_servers.grok-search-rs]
-command = "npx"
-args = ["-y", "grok-search-rs"]
-env = { GROK_SEARCH_API_KEY = "xai-...", TAVILY_API_KEY = "tvly-..." }
-```
-
-
-
-**Gemini CLI** — edit `~/.gemini/settings.json`
-
-```json
-{
-  "mcpServers": {
-    "grok-search-rs": {
-      "command": "grok-search-rs",
-      "env": {
-        "GROK_SEARCH_API_KEY": "xai-...",
-        "TAVILY_API_KEY": "tvly-..."
-      }
-    }
-  }
-}
-```
-
-Swap `"command": "grok-search-rs"` for `"command": "npx", "args": ["-y", "grok-search-rs"]` if you'd rather not install globally.
-
-
-
-**Cursor** — edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "grok-search-rs": {
-      "command": "grok-search-rs",
-      "env": {
-        "GROK_SEARCH_API_KEY": "xai-...",
-        "TAVILY_API_KEY": "tvly-..."
-      }
-    }
-  }
-}
-```
-
-
-
-**VS Code** — `.vscode/mcp.json`
-
-```json
-{
-  "servers": {
-    "grok-search-rs": {
-      "type": "stdio",
-      "command": "grok-search-rs",
-      "env": {
-        "GROK_SEARCH_API_KEY": "xai-...",
-        "TAVILY_API_KEY": "tvly-..."
-      }
-    }
-  }
-}
-```
-
-
-
-**Windsurf** — `~/.codeium/windsurf/mcp_config.json`
-
-```json
-{
-  "mcpServers": {
-    "grok-search-rs": {
-      "command": "grok-search-rs",
-      "env": {
-        "GROK_SEARCH_API_KEY": "xai-...",
-        "TAVILY_API_KEY": "tvly-..."
-      }
-    }
-  }
-}
-```
-
-
-
-> ⚠️ `grok-search-rs` / `npx grok-search-rs` is **not meant to be launched directly**. It speaks MCP over stdio — your client launches it. Running it in a terminal prints an onboarding guide.
-
-> 💡 **Multiple clients?** Run `grok-search-rs --init` once to set keys globally. See [Global config file](#-global-config-file-set-once-reuse-across-clients).
+The npm package ships a native Rust binary; the `grok-search-rs` command is what your MCP client launches.
 
 ---
 
-## 🪄 Install via AI prompt
+## Quick Start
 
-Paste this into your AI assistant — it'll detect the client and wire up the config:
+1. Scaffold a global config file (one‑time, optional):
 
-```text
-Install the grok-search-rs MCP server (npx -y grok-search-rs) into my current client, ask me for GROK_SEARCH_API_KEY and TAVILY_API_KEY, then call doctor to verify. Docs: https://github.com/Episkey-G/GrokSearch-rs#readme
-```
+   ```bash
+   grok-search-rs --init
+   $EDITOR ~/.config/grok-search-rs/config.toml
+   ```
 
----
+2. Wire it into one MCP client. Example for Claude Code:
 
-## 🧰 MCP Tools
+   ```bash
+   claude mcp add-json grok-search-rs --scope user '{
+     "type": "stdio",
+     "command": "grok-search-rs",
+     "env": {
+       "GROK_SEARCH_API_KEY": "xai-...",
+       "TAVILY_API_KEY": "tvly-..."
+     }
+   }'
+   ```
 
+   For other clients (Codex / Cursor / Gemini / VS Code / Windsurf), use the same JSON shape inside their MCP config file. If you ran `--init` and put your keys in the config file, the `env` block can be omitted.
 
-| Tool          | When to call it                                                                      |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `web_search`  | Sourced summary for a topic. Sources are cached for follow‑ups.                      |
-| `get_sources` | Re‑fetch sources of a previous `web_search` by `session_id`.                         |
-| `web_fetch`   | Page content — quotes, exact numbers, technical detail. Tavily → Firecrawl fallback. |
-| `web_map`     | Discover URLs on a domain via Tavily Map.                                            |
-| `doctor`      | Live connectivity probe + redacted config. Run first when something looks off.       |
+3. Verify:
 
+   ```text
+   Ask your assistant: "call doctor"
+   ```
 
----
-
-## 🌐 Upstream protocol
-
-
-| MCP tool     | Upstream              | Endpoint                              | Fallback                       |
-| ------------ | --------------------- | ------------------------------------- | ------------------------------ |
-| `web_search` | Grok (xAI‑compatible) | `POST {GROK_SEARCH_URL}/v1/responses` | Tavily / Firecrawl for sources |
-| `web_fetch`  | Tavily                | `POST {TAVILY_API_URL}/extract`       | Firecrawl `/v1/scrape`         |
-| `web_map`    | Tavily                | `POST {TAVILY_API_URL}/map`           | —                              |
-| `doctor`     | all three             | probes each                           | —                              |
-
-
-`grok-search-rs` supports two upstream transports — by default it calls the **Responses API** (`/v1/responses`); see [Choosing a transport](#-choosing-a-transport) below for the OpenAI‑compatible `/v1/chat/completions` mode.
-
-`GROK_SEARCH_URL` accepts the root URL, a `/v1` base, or a full endpoint — all normalized to `/v1` internally. Verified upstreams: **xAI** (`https://api.x.ai`, both tools), **Modelverse** (`https://api.modelverse.cn`, `x_search` depends on relay).
+   Successful output shows `reachable: true` for each enabled upstream and `transport: Responses` (or `ChatCompletions`).
 
 ---
 
-## 🔀 Choosing a transport
+## Configuration
 
-`grok-search-rs` supports two upstream transports — pick whichever your gateway implements:
+Pick **one** transport group. Both Tavily and Firecrawl keys are shared across transports.
 
-| Transport | Endpoint | Env-var group | Best for |
-|---|---|---|---|
-| **Responses (default)** | `POST /v1/responses` with `tools:[{"type":"web_search"}]` | `GROK_SEARCH_URL` / `GROK_SEARCH_API_KEY` / `GROK_SEARCH_MODEL` | xAI direct or any gateway implementing the Responses API (e.g. modelverse). Required for `x_search`. |
-| **Chat-Completions** | `POST /v1/chat/completions` with `tools:[{"type":"web_search"}]` | `OPENAI_COMPATIBLE_API_URL` / `OPENAI_COMPATIBLE_API_KEY` / `OPENAI_COMPATIBLE_MODEL` | OpenAI-compatible gateways that auto-search server-side or honor the `web_search` tool. |
+### A. Native Grok Responses (default)
 
-**Selection rules:**
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROK_SEARCH_API_KEY` | — *(required)* | Bearer token for the Grok / xAI gateway. |
+| `GROK_SEARCH_URL` | `https://api.x.ai` | Root, `/v1`, or full‑endpoint URL. |
+| `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model name. |
+| `GROK_SEARCH_WEB_SEARCH` | `true` | Offer `web_search` tool to Grok. |
+| `GROK_SEARCH_X_SEARCH` | `false` | Offer `x_search` tool (X/Twitter) to Grok. |
 
-- If `GROK_SEARCH_API_KEY` is set, the Responses transport is used (even if the OpenAI-compatible group is also set).
-- Otherwise, if both `OPENAI_COMPATIBLE_API_URL` and `OPENAI_COMPATIBLE_API_KEY` are set, the Chat-Completions transport is used.
-- `x_search_enabled` is silently ignored on the Chat-Completions path; the warning prints once at startup.
+Verified upstreams: **xAI** (`https://api.x.ai`, both tools), **Modelverse** (`https://api.modelverse.cn`, `x_search` depends on relay).
 
-**Source extraction on Chat-Completions** runs four paths and merges (de-duped by URL):
+### B. OpenAI‑compatible chat/completions
 
-1. `choices[0].message.annotations[].url_citation` — OpenAI standard
-2. `choices[0].message.citations` and top-level `citations` — Perplexity-style
-3. top-level `search_sources[]` — marybrown-style auto-search gateways
-4. inline `[[n]](url)` markers in the content — last-resort fallback
+Activate by setting the URL **and** key while leaving `GROK_SEARCH_API_KEY` unset. Suitable for any OpenAI‑compatible relay (one‑api, vLLM, LiteLLM, marybrown, Perplexity‑style gateways, etc.).
 
----
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENAI_COMPATIBLE_API_URL` | — | Root, `/v1`, or full‑endpoint URL. |
+| `OPENAI_COMPATIBLE_API_KEY` | — | Bearer token for the relay. |
+| `OPENAI_COMPATIBLE_MODEL` | falls back to `GROK_SEARCH_MODEL` | Model name to send. |
 
-## 🔍 Search modes — `web_search` vs `x_search`
+Notes:
 
-Grok Responses exposes two search tool types; each can be toggled independently. The MCP tool name your client sees (`web_search`) stays the same.
+- `GROK_SEARCH_WEB_SEARCH=true` (default) appends `tools:[{"type":"web_search"}]` to the payload. Relays that auto‑search server‑side simply ignore it.
+- `GROK_SEARCH_X_SEARCH=true` is **silently ignored** on this transport (a one‑line stderr warning prints at startup). `x_search` only exists on the Responses API.
+- Source extraction reads four parallel paths and de‑duplicates by URL: OpenAI `annotations[].url_citation`, Perplexity‑style `citations`, top‑level `search_sources[]`, and inline `[[n]](url)` markers.
 
+### Tavily / Firecrawl (shared)
 
-| Env var                  | Default | Effect                                            |
-| ------------------------ | ------- | ------------------------------------------------- |
-| `GROK_SEARCH_WEB_SEARCH` | `true`  | Offer Grok the `web_search` tool (open web).      |
-| `GROK_SEARCH_X_SEARCH`   | `false` | Offer Grok the `x_search` tool (X/Twitter posts). |
+| Variable | Default | Purpose |
+|---|---|---|
+| `TAVILY_API_KEY` | — *(required for `web_fetch` / `web_map`)* | Tavily key. |
+| `TAVILY_API_URL` | `https://api.tavily.com` | Tavily base. |
+| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Extra Tavily sources after a Grok answer (`0` disables). |
+| `GROK_SEARCH_FALLBACK_SOURCES` | `5` | Fallback source count when the AI step can't verify itself. |
+| `FIRECRAWL_API_KEY` | unset | Enables Firecrawl as `web_fetch` / source fallback. |
+| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base. |
+| `GROK_SEARCH_CACHE_SIZE` | `256` | Max cached `web_search` sessions. |
+| `GROK_SEARCH_TIMEOUT_SECONDS` | `60` | HTTP timeout for all upstreams. |
+| `GROK_SEARCH_FETCH_MAX_CHARS` | unset | Default char cap on `web_fetch`. |
 
+### Selection rules at startup
 
-When both are on, Grok picks per query — factual queries lean web, "what are people on X saying…" leans X.
+1. If `GROK_SEARCH_API_KEY` is set → **Responses** transport.
+2. Else if both `OPENAI_COMPATIBLE_API_URL` and `OPENAI_COMPATIBLE_API_KEY` are set → **ChatCompletions** transport.
+3. Else → server fails with a clear `MissingConfig` error.
 
-```bash
-GROK_SEARCH_X_SEARCH=true   # enable X search
-```
+### Global config file
 
-Restart your MCP client, then verify with `doctor` (`x_search_enabled: true`).
+Tired of duplicating `env` blocks across clients? Run `grok-search-rs --init` once to scaffold `<home>/.config/grok-search-rs/config.toml`, fill in your keys, and every client can shrink to `{"command": "grok-search-rs"}`.
 
-> ⚠️ `x_search` requires the upstream to expose the `x_search` tool type. xAI's official API does; some relays strip it.
+| Path order | Location |
+|---|---|
+| 1 | `$GROK_SEARCH_CONFIG` (explicit override, any platform) |
+| 2 | `$HOME/.config/grok-search-rs/config.toml` (Unix / macOS / Git Bash) |
+| 3 | `%USERPROFILE%\.config\grok-search-rs\config.toml` (native Windows) |
 
----
-
-## ⚙️ Configuration
-
-All config is via env vars, grouped by upstream.
-
-### Grok Responses (required)
-
-
-| Variable                 | Default                   | Purpose                            |
-| ------------------------ | ------------------------- | ---------------------------------- |
-| `GROK_SEARCH_API_KEY`    | — *(required)*            | Bearer token for the Grok gateway. |
-| `GROK_SEARCH_URL`        | `https://api.x.ai`        | Root, `/v1`, or full‑endpoint URL. |
-| `GROK_SEARCH_MODEL`      | `grok-4-1-fast-reasoning` | Model name.                        |
-| `GROK_SEARCH_WEB_SEARCH` | `true`                    | Offer `web_search` to Grok.        |
-| `GROK_SEARCH_X_SEARCH`   | `false`                   | Offer `x_search` to Grok.          |
-
-
-### Tavily (required for `web_fetch` / `web_map`)
-
-
-| Variable                       | Default                  | Purpose                                                  |
-| ------------------------------ | ------------------------ | -------------------------------------------------------- |
-| `TAVILY_API_KEY`               | — *(required)*           | Tavily key.                                              |
-| `TAVILY_API_URL`               | `https://api.tavily.com` | Tavily base.                                             |
-| `TAVILY_ENABLED`               | `true`                   | Force‑disable even with a key.                           |
-| `GROK_SEARCH_EXTRA_SOURCES`    | `3`                      | Extra Tavily sources after a Grok answer (`0` disables). |
-| `GROK_SEARCH_FALLBACK_SOURCES` | `5`                      | Fallback source count when Grok can't verify itself.     |
-
-
-### Firecrawl (optional fallback)
-
-
-| Variable            | Default                     | Purpose                                    |
-| ------------------- | --------------------------- | ------------------------------------------ |
-| `FIRECRAWL_API_KEY` | unset                       | Enables Firecrawl as `web_fetch` fallback. |
-| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base.                            |
-| `FIRECRAWL_ENABLED` | `true`                      | Force‑disable even with a key.             |
-
-
-### Runtime
-
-
-| Variable                      | Default | Purpose                                                          |
-| ----------------------------- | ------- | ---------------------------------------------------------------- |
-| `GROK_SEARCH_CACHE_SIZE`      | `256`   | Max cached `web_search` sessions.                                |
-| `GROK_SEARCH_TIMEOUT_SECONDS` | `60`    | HTTP timeout for all upstreams.                                  |
-| `GROK_SEARCH_FETCH_MAX_CHARS` | unset   | Default char cap on `web_fetch`; per‑call `max_chars` overrides. |
-
-
-> Boolean env vars: `1` / `true` / `yes` = on; anything else = off.
-
-### Minimal `.env`
-
-```bash
-GROK_SEARCH_API_KEY=xai-...
-TAVILY_API_KEY=tvly-...
-FIRECRAWL_API_KEY=fc-...        # optional
-GROK_SEARCH_X_SEARCH=true       # optional
-```
-
-### 🗂 Global config file (set once, reuse across clients)
-
-Tired of duplicating `env` blocks in every client's MCP config? Run `grok-search-rs --init` to scaffold `<home>/.config/grok-search-rs/config.toml`, fill in your keys, and every client can shrink to just `{"command": "grok-search-rs"}`. Works the same on macOS, Linux, and Windows — no shell variables to set.
-
-```bash
-grok-search-rs --init       # scaffold template (idempotent, never overwrites)
-$EDITOR ~/.config/grok-search-rs/config.toml
-```
-
-PowerShell:
-
-```powershell
-grok-search-rs --init
-notepad $env:USERPROFILE\.config\grok-search-rs\config.toml
-```
-
-**Path** (auto‑detected):
-
-1. `$GROK_SEARCH_CONFIG` — explicit override path (any platform).
-2. `$HOME/.config/grok-search-rs/config.toml` — Unix, macOS, Git Bash.
-3. `%USERPROFILE%\.config\grok-search-rs\config.toml` — native Windows shells.
-
-**Precedence**: client `env` block **>** config file **>** built‑in defaults. So a per‑client `env` can still override the file when you want a one‑off model.
-
-After this, your client config can shrink to just the command:
-
-```json
-{ "command": "grok-search-rs" }
-```
-
-> File keys use lowercase `snake_case` (env `GROK_SEARCH_MODEL` → file `grok_model`). Unknown keys are rejected. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+**Precedence**: per‑client `env` **>** config file **>** built‑in defaults. File keys are lowercase `snake_case` (env `GROK_SEARCH_MODEL` → file `grok_model`). Unknown keys are rejected. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
-## 🏗 Build from source
+## MCP Tools
+
+| Tool | When to call it |
+|---|---|
+| `web_search` | Sourced summary for a topic. Sources cached for follow‑up. |
+| `get_sources` | Re‑fetch sources of a previous `web_search` by `session_id`. |
+| `web_fetch` | Page content (Tavily → Firecrawl fallback). |
+| `web_map` | Discover URLs on a domain via Tavily Map. |
+| `doctor` | Live connectivity probe + redacted config. Run first when something looks off. |
+
+---
+
+## Build from source
 
 ```bash
 git clone https://github.com/Episkey-G/GrokSearch-rs.git
@@ -363,26 +149,11 @@ cd GrokSearch-rs
 cargo build --release
 ```
 
-MCP entry for the local binary:
-
-```json
-{
-  "mcpServers": {
-    "grok-search-rs": {
-      "type": "stdio",
-      "command": "/absolute/path/to/target/release/grok-search-rs",
-      "env": {
-        "GROK_SEARCH_API_KEY": "xai-...",
-        "TAVILY_API_KEY": "tvly-..."
-      }
-    }
-  }
-}
-```
+The binary lands at `target/release/grok-search-rs`. Point your MCP client's `command` at the absolute path.
 
 ---
 
-## 🧪 Development
+## Development
 
 ```bash
 cargo fmt --check
@@ -404,11 +175,13 @@ More docs:
   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Episkey-G/GrokSearch-rs&type=Date" />
 </a>
 
-## 🙏 Acknowledgements
+---
+
+## Acknowledgements
 
 - Inspired by [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch) — the original Python implementation that pioneered the Grok + Tavily + Firecrawl combo this project rewrites in Rust.
 - Thanks to the [LinuxDo](https://linux.do) community for the discussions, feedback, and the prior art that inspired this rewrite.
 
-## 📜 License
+## License
 
 MIT — see [LICENSE](LICENSE).
