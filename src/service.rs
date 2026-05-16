@@ -41,6 +41,13 @@ impl AiProvider for GrokResponsesProvider {
 }
 
 #[async_trait]
+impl AiProvider for crate::providers::openai_compatible::OpenAICompatProvider {
+    async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
+        crate::providers::openai_compatible::OpenAICompatProvider::search(self, request).await
+    }
+}
+
+#[async_trait]
 impl SourceProvider for TavilyProvider {
     async fn search_sources(
         &self,

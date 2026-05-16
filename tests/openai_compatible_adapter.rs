@@ -133,3 +133,30 @@ fn errors_when_content_empty_and_no_sources() {
     let raw = json!({ "choices": [{ "message": { "content": "" } }] });
     assert!(parse_chat_completions(&raw).is_err());
 }
+
+use grok_search_rs::providers::openai_compatible::OpenAICompatProvider;
+use std::time::Duration;
+
+#[test]
+fn provider_endpoint_appends_chat_completions() {
+    let p = OpenAICompatProvider::new(
+        "https://example.com/v1",
+        "sk-fake",
+        "grok-4.3-fast",
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(p.endpoint(), "https://example.com/v1/chat/completions");
+}
+
+#[test]
+fn provider_endpoint_strips_trailing_slash() {
+    let p = OpenAICompatProvider::new(
+        "https://example.com/v1/",
+        "sk-fake",
+        "grok-4.3-fast",
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(p.endpoint(), "https://example.com/v1/chat/completions");
+}
