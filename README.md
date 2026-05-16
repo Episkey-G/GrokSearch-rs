@@ -209,9 +209,33 @@ Install the grok-search-rs MCP server (npx -y grok-search-rs) into my current cl
 | `doctor`     | all three             | probes each                           | —                              |
 
 
-`grok-search-rs` always calls the **Responses API** (`/v1/responses`), not `/v1/chat/completions`. Your upstream must implement that endpoint and accept the `web_search` / `x_search` tool types.
+`grok-search-rs` supports two upstream transports — by default it calls the **Responses API** (`/v1/responses`); see [Choosing a transport](#-choosing-a-transport) below for the OpenAI‑compatible `/v1/chat/completions` mode.
 
 `GROK_SEARCH_URL` accepts the root URL, a `/v1` base, or a full endpoint — all normalized to `/v1` internally. Verified upstreams: **xAI** (`https://api.x.ai`, both tools), **Modelverse** (`https://api.modelverse.cn`, `x_search` depends on relay).
+
+---
+
+## 🔀 Choosing a transport
+
+`grok-search-rs` supports two upstream transports — pick whichever your gateway implements:
+
+| Transport | Endpoint | Env-var group | Best for |
+|---|---|---|---|
+| **Responses (default)** | `POST /v1/responses` with `tools:[{"type":"web_search"}]` | `GROK_SEARCH_URL` / `GROK_SEARCH_API_KEY` / `GROK_SEARCH_MODEL` | xAI direct or any gateway implementing the Responses API (e.g. modelverse). Required for `x_search`. |
+| **Chat-Completions** | `POST /v1/chat/completions` with `tools:[{"type":"web_search"}]` | `OPENAI_COMPATIBLE_API_URL` / `OPENAI_COMPATIBLE_API_KEY` / `OPENAI_COMPATIBLE_MODEL` | OpenAI-compatible gateways that auto-search server-side or honor the `web_search` tool. |
+
+**Selection rules:**
+
+- If `GROK_SEARCH_API_KEY` is set, the Responses transport is used (even if the OpenAI-compatible group is also set).
+- Otherwise, if both `OPENAI_COMPATIBLE_API_URL` and `OPENAI_COMPATIBLE_API_KEY` are set, the Chat-Completions transport is used.
+- `x_search_enabled` is silently ignored on the Chat-Completions path; the warning prints once at startup.
+
+**Source extraction on Chat-Completions** runs four paths and merges (de-duped by URL):
+
+1. `choices[0].message.annotations[].url_citation` — OpenAI standard
+2. `choices[0].message.citations` and top-level `citations` — Perplexity-style
+3. top-level `search_sources[]` — marybrown-style auto-search gateways
+4. inline `[[n]](url)` markers in the content — last-resort fallback
 
 ---
 

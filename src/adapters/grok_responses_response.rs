@@ -1,3 +1,4 @@
+use crate::adapters::sources::dedupe_sources;
 use crate::error::{GrokSearchError, Result};
 use crate::model::search::SearchResponse;
 use crate::model::source::Source;
@@ -110,7 +111,3 @@ fn push_nonempty(text_parts: &mut Vec<String>, text: &str) {
     }
 }
 
-fn dedupe_sources(sources: &mut Vec<Source>) {
-    let mut seen = std::collections::HashSet::new();
-    sources.retain(|source| !source.url.trim().is_empty() && seen.insert(source.url.clone()));
-}

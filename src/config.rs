@@ -4,6 +4,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Responses,
+    ChatCompletions,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub grok_api_url: String,
@@ -22,6 +28,10 @@ pub struct Config {
     pub fetch_max_chars: Option<usize>,
     pub cache_size: usize,
     pub timeout: Duration,
+    pub openai_compatible_api_url: Option<String>,
+    pub openai_compatible_api_key: Option<String>,
+    pub openai_compatible_model: Option<String>,
+    pub transport: Transport,
 }
 
 /// Mirror of `Config` for TOML deserialization. All fields optional so users
@@ -45,6 +55,9 @@ struct ConfigFile {
     fetch_max_chars: Option<usize>,
     cache_size: Option<usize>,
     timeout_seconds: Option<u64>,
+    openai_compatible_api_url: Option<String>,
+    openai_compatible_api_key: Option<String>,
+    openai_compatible_model: Option<String>,
 }
 
 impl ConfigFile {
@@ -97,6 +110,9 @@ impl ConfigFile {
             "GROK_SEARCH_TIMEOUT_SECONDS",
             self.timeout_seconds.map(|n| n.to_string()),
         );
+        insert("OPENAI_COMPATIBLE_API_URL", self.openai_compatible_api_url);
+        insert("OPENAI_COMPATIBLE_API_KEY", self.openai_compatible_api_key);
+        insert("OPENAI_COMPATIBLE_MODEL", self.openai_compatible_model);
         out
     }
 }
@@ -169,6 +185,19 @@ impl Config {
             fetch_max_chars: optional_positive_usize(&map, "GROK_SEARCH_FETCH_MAX_CHARS"),
             cache_size: usize_value(&map, "GROK_SEARCH_CACHE_SIZE", 256),
             timeout: Duration::from_secs(u64_value(&map, "GROK_SEARCH_TIMEOUT_SECONDS", 60)),
+            openai_compatible_api_url: map
+                .get("OPENAI_COMPATIBLE_API_URL")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            openai_compatible_api_key: map
+                .get("OPENAI_COMPATIBLE_API_KEY")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            openai_compatible_model: map
+                .get("OPENAI_COMPATIBLE_MODEL")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            transport: decide_transport(&map),
         }
     }
 
@@ -290,6 +319,15 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # tavily_api_url    = "https://api.tavily.com"
 # firecrawl_api_url = "https://api.firecrawl.dev"
 
+# ── OpenAI-compatible transport (alternative to grok_*) ───────
+# Set these three to use a /v1/chat/completions gateway. When grok_api_key
+# above is also set, it wins; otherwise these three pick the chat-completions
+# transport. Source extraction supports OpenAI annotations, Perplexity-style
+# citations, marybrown's top-level search_sources, and inline [[n]](url).
+# openai_compatible_api_url = "https://your-gateway/v1"
+# openai_compatible_api_key = "sk-..."
+# openai_compatible_model   = "grok-4.3-fast"
+
 # ── Feature toggles ───────────────────────────────────────────
 # web_search_enabled = true
 # tavily_enabled     = true
@@ -334,7 +372,9 @@ fn get(map: &HashMap<String, String>, key: &str, default: &str) -> String {
 
 pub fn normalize_v1_base(url: &str) -> String {
     let mut value = url.trim().trim_end_matches('/').to_string();
-    for suffix in ["/responses"] {
+    // Strip any known full-endpoint suffix so callers can pass either a base
+    // URL or a full endpoint and converge on the same `/v1` form.
+    for suffix in ["/chat/completions", "/responses"] {
         if value.ends_with(suffix) {
             let keep = value.len() - suffix.len();
             value.truncate(keep);
@@ -378,10 +418,78 @@ fn optional_positive_usize(map: &HashMap<String, String>, key: &str) -> Option<u
         .filter(|value| *value > 0)
 }
 
+fn decide_transport(map: &HashMap<String, String>) -> Transport {
+    let grok_key_set = map
+        .get("GROK_SEARCH_API_KEY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let compat_url_set = map
+        .get("OPENAI_COMPATIBLE_API_URL")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let compat_key_set = map
+        .get("OPENAI_COMPATIBLE_API_KEY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
+    if grok_key_set {
+        return Transport::Responses;
+    }
+    if compat_url_set && compat_key_set {
+        return Transport::ChatCompletions;
+    }
+    Transport::Responses
+}
+
 fn redact(value: Option<&str>) -> String {
     match value {
         None => "unset".to_string(),
         Some(v) if v.len() <= 8 => "***".to_string(),
         Some(v) => format!("{}***{}", &v[..4], &v[v.len() - 4..]),
+    }
+}
+
+#[cfg(test)]
+mod transport_field_tests {
+    use super::*;
+
+    #[test]
+    fn loads_openai_compatible_fields_from_env() {
+        let cfg = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+            ("OPENAI_COMPATIBLE_MODEL", "grok-4.3-fast"),
+        ]);
+        assert_eq!(
+            cfg.openai_compatible_api_url.as_deref(),
+            Some("https://example.com/v1")
+        );
+        assert_eq!(cfg.openai_compatible_api_key.as_deref(), Some("sk-fake"));
+        assert_eq!(cfg.openai_compatible_model.as_deref(), Some("grok-4.3-fast"));
+    }
+
+    #[test]
+    fn transport_defaults_to_responses_when_only_grok_set() {
+        let cfg = Config::from_env_map([("GROK_SEARCH_API_KEY", "xai-fake")]);
+        assert_eq!(cfg.transport, Transport::Responses);
+    }
+
+    #[test]
+    fn transport_chat_completions_when_only_compat_set() {
+        let cfg = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+        ]);
+        assert_eq!(cfg.transport, Transport::ChatCompletions);
+    }
+
+    #[test]
+    fn transport_prefers_grok_when_both_set() {
+        let cfg = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "xai-fake"),
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+        ]);
+        assert_eq!(cfg.transport, Transport::Responses);
     }
 }
