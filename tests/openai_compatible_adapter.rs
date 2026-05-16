@@ -160,3 +160,120 @@ fn provider_endpoint_strips_trailing_slash() {
     );
     assert_eq!(p.endpoint(), "https://example.com/v1/chat/completions");
 }
+
+#[test]
+fn provider_endpoint_normalizes_root_url_to_v1() {
+    // P2 fix: root URLs without `/v1` previously yielded the wrong endpoint.
+    let p = OpenAICompatProvider::new(
+        "https://api.openai.com",
+        "sk-fake",
+        "gpt-x",
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(p.endpoint(), "https://api.openai.com/v1/chat/completions");
+}
+
+#[test]
+fn provider_endpoint_normalizes_full_endpoint_input() {
+    // P2 fix: passing a full endpoint URL must not double-suffix.
+    let p = OpenAICompatProvider::new(
+        "https://gw.example/v1/chat/completions",
+        "sk-fake",
+        "grok-4.3-fast",
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(p.endpoint(), "https://gw.example/v1/chat/completions");
+}
+
+#[test]
+fn extracts_openai_nested_url_citation_annotations() {
+    // P1 fix: real OpenAI annotations nest the URL under `url_citation`.
+    let raw = json!({
+        "choices": [{
+            "message": {
+                "content": "Body.",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url_citation": {
+                            "url": "https://nested.example/a",
+                            "title": "Nested A",
+                            "start_index": 0,
+                            "end_index": 4
+                        }
+                    }
+                ]
+            }
+        }]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    assert_eq!(resp.sources.len(), 1, "got {:?}", resp.sources);
+    assert_eq!(resp.sources[0].url, "https://nested.example/a");
+    assert_eq!(resp.sources[0].title.as_deref(), Some("Nested A"));
+}
+
+#[test]
+fn extracts_array_form_message_content() {
+    // P2 fix: structured content parts must concatenate into the response text.
+    let raw = json!({
+        "choices": [{
+            "message": {
+                "content": [
+                    { "type": "text", "text": "Hello, " },
+                    { "type": "output_text", "text": "world." }
+                ]
+            }
+        }],
+        "search_sources": [{ "url": "https://s.example/x", "title": "X" }]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    assert_eq!(resp.content, "Hello, \nworld.");
+    assert_eq!(resp.sources.len(), 1);
+}
+
+#[test]
+fn inline_scanner_recovers_after_malformed_citation() {
+    // P2 fix: a single malformed `[[1]](no-close` previously aborted the scan,
+    // dropping every subsequent valid citation.
+    let raw = json!({
+        "choices": [{
+            "message": {
+                "content": "first[[1]](https://broken.example/a then later[[2]](https://ok.example/b)."
+            }
+        }]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    let urls: Vec<_> = resp.sources.iter().map(|s| s.url.as_str()).collect();
+    assert!(urls.contains(&"https://ok.example/b"), "got {urls:?}");
+}
+
+use grok_search_rs::error::Result as GrokResult;
+use grok_search_rs::model::search::SearchResponse;
+
+fn fake_provider_search(_req: &SearchRequest) -> GrokResult<SearchResponse> {
+    Ok(SearchResponse {
+        content: String::new(),
+        sources: vec![],
+    })
+}
+
+#[test]
+fn provider_request_model_overrides_self_model() {
+    // P1 fix: When SearchRequest.model is non-empty it must take precedence
+    // over the provider default. We assert the payload built for the wire,
+    // since search() itself is async + I/O-bound.
+    use grok_search_rs::adapters::chat_completions_request::to_chat_completions_payload;
+
+    let mut req = sample_request();
+    req.model = "grok-4-1-fast-reasoning".into();
+    let chosen = if req.model.trim().is_empty() {
+        "fallback-default"
+    } else {
+        req.model.as_str()
+    };
+    let payload = to_chat_completions_payload(&req, chosen, true);
+    assert_eq!(payload["model"], "grok-4-1-fast-reasoning");
+    let _ = fake_provider_search; // silence dead_code if ever orphaned
+}

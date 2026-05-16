@@ -334,7 +334,9 @@ fn get(map: &HashMap<String, String>, key: &str, default: &str) -> String {
 
 pub fn normalize_v1_base(url: &str) -> String {
     let mut value = url.trim().trim_end_matches('/').to_string();
-    for suffix in ["/responses"] {
+    // Strip any known full-endpoint suffix so callers can pass either a base
+    // URL or a full endpoint and converge on the same `/v1` form.
+    for suffix in ["/chat/completions", "/responses"] {
         if value.ends_with(suffix) {
             let keep = value.len() - suffix.len();
             value.truncate(keep);

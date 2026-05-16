@@ -17,8 +17,8 @@ const PROVIDER_LABEL: &str = "openai_compatible";
 pub fn parse_chat_completions(raw: &Value) -> Result<SearchResponse> {
     let content = raw
         .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .unwrap_or("")
+        .map(extract_content_text)
+        .unwrap_or_default()
         .trim()
         .to_string();
 
@@ -69,6 +69,52 @@ fn collect_sources_from_value(value: &Value, out: &mut Vec<Source>) {
     }
 }
 
+/// Reduce a `message.content` value to a plain string. OpenAI now returns
+/// content either as `String` (legacy) or as an array of typed parts
+/// (`[{type:"text", text:"..."}, {type:"output_text", text:"..."}]`). Concat
+/// every textual chunk so structured responses don't get treated as empty.
+fn extract_content_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => {
+            let mut buf = String::new();
+            for part in parts {
+                match part {
+                    Value::String(s) => {
+                        if !buf.is_empty() {
+                            buf.push('\n');
+                        }
+                        buf.push_str(s);
+                    }
+                    Value::Object(_) => {
+                        if let Some(t) = part
+                            .get("text")
+                            .or_else(|| part.get("content"))
+                            .or_else(|| part.get("value"))
+                            .and_then(Value::as_str)
+                        {
+                            if !buf.is_empty() {
+                                buf.push('\n');
+                            }
+                            buf.push_str(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            buf
+        }
+        Value::Object(_) => value
+            .get("text")
+            .or_else(|| value.get("content"))
+            .or_else(|| value.get("value"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 fn collect_one(item: &Value, out: &mut Vec<Source>) {
     if let Some(url) = item.as_str() {
         if url.starts_with("http://") || url.starts_with("https://") {
@@ -76,6 +122,9 @@ fn collect_one(item: &Value, out: &mut Vec<Source>) {
         }
         return;
     }
+    // OpenAI standard annotation: { type:"url_citation", url_citation:{url,title,...} }
+    // Unwrap one level so the rest of this fn treats the nested object as the source.
+    let item = item.get("url_citation").unwrap_or(item);
     let Some(url) = item
         .get("url")
         .or_else(|| item.get("uri"))
@@ -117,6 +166,10 @@ fn collect_one(item: &Value, out: &mut Vec<Source>) {
 /// Find inline citations of the form `[[n]](https://...)` and `[[n]](http://...)`
 /// in the response text. We avoid the `regex` crate to keep the dependency
 /// footprint flat — a hand-rolled scanner is sufficient for this fixed pattern.
+///
+/// On any malformed match (missing `]]`, missing `(`, missing closing `)`,
+/// non-numeric inside `[[...]]`), advance past the offending `[[` and keep
+/// scanning so a single bad citation never wipes out later valid ones.
 fn extract_inline_bracket_citations(content: &str, out: &mut Vec<Source>) {
     let mut offset = 0usize;
     while offset < content.len() {
@@ -127,6 +180,7 @@ fn extract_inline_bracket_citations(content: &str, out: &mut Vec<Source>) {
         let abs = offset + rel_idx;
         let after = &content[abs + 2..];
         let Some(close_brackets) = after.find("]]") else {
+            // No `]]` anywhere ahead — nothing more to find. Bail out.
             break;
         };
         let between = &after[..close_brackets];
@@ -140,10 +194,29 @@ fn extract_inline_bracket_citations(content: &str, out: &mut Vec<Source>) {
             continue;
         }
         let url_start = 1usize; // skip the '('
-        let Some(close_paren) = after_brackets[url_start..].find(')') else {
-            break;
+        // Find the first `)` *that closes a well-formed URL*. URLs do not
+        // legitimately contain whitespace or another `[`, so treat those as
+        // bailout signals — otherwise a missing-`)` citation could swallow
+        // the rest of the document into a single bogus URL.
+        let url_window = &after_brackets[url_start..];
+        let mut bail: Option<usize> = None;
+        for (i, ch) in url_window.char_indices() {
+            if ch == ')' {
+                bail = Some(i);
+                break;
+            }
+            if ch == ' ' || ch == '\n' || ch == '\t' || ch == '[' || ch == '<' {
+                break;
+            }
+        }
+        let Some(close_paren) = bail else {
+            // Malformed: no `)` ahead before whitespace / next bracket. Skip
+            // past this `[[` and keep scanning; earlier code dropped every
+            // later citation in the same response.
+            offset = abs + 2;
+            continue;
         };
-        let url = &after_brackets[url_start..url_start + close_paren];
+        let url = &url_window[..close_paren];
         if url.starts_with("http://") || url.starts_with("https://") {
             out.push(Source::new(url, PROVIDER_LABEL));
         }

@@ -1,5 +1,6 @@
 use crate::adapters::chat_completions_request::to_chat_completions_payload;
 use crate::adapters::chat_completions_response::parse_chat_completions;
+use crate::config::normalize_v1_base;
 use crate::error::Result;
 use crate::model::search::{SearchRequest, SearchResponse};
 use crate::providers::http::{build_client, post_json};
@@ -44,7 +45,11 @@ impl OpenAICompatProvider {
     ) -> Self {
         Self {
             client,
-            api_url: api_url.into().trim_end_matches('/').to_string(),
+            // Mirror the Responses provider: accept root URLs, `/v1` bases, or
+            // full endpoints, and converge on a `/v1` base. Without this,
+            // `https://api.openai.com` would produce
+            // `https://api.openai.com/chat/completions` (missing `/v1`).
+            api_url: normalize_v1_base(&api_url.into()),
             api_key: api_key.into(),
             model: model.into(),
             include_web_search_tool,
@@ -56,8 +61,15 @@ impl OpenAICompatProvider {
     }
 
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
-        let payload =
-            to_chat_completions_payload(request, &self.model, self.include_web_search_tool);
+        // Honor per-request model overrides (e.g. WebSearchInput.model) the same
+        // way the Responses path does; fall back to the provider default only when
+        // the request leaves the field empty.
+        let model = if request.model.trim().is_empty() {
+            self.model.as_str()
+        } else {
+            request.model.as_str()
+        };
+        let payload = to_chat_completions_payload(request, model, self.include_web_search_tool);
         let raw = post_json(
             &self.client,
             &self.endpoint(),
