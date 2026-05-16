@@ -295,3 +295,56 @@ fn config_path_honors_explicit_env_override() {
         assert!(p.ends_with("config.toml"));
     }
 }
+
+#[test]
+fn config_path_explicit_override_wins_over_home() {
+    let path = config::config_path_for([
+        ("GROK_SEARCH_CONFIG", "/tmp/custom/grok.toml"),
+        ("HOME", "/home/ignored"),
+        ("USERPROFILE", "C:\\Users\\ignored"),
+    ])
+    .expect("explicit override must resolve");
+    assert_eq!(path, std::path::PathBuf::from("/tmp/custom/grok.toml"));
+}
+
+#[test]
+fn config_path_uses_home_on_unix_layout() {
+    let path = config::config_path_for([("HOME", "/home/alice")])
+        .expect("HOME must produce a path");
+    let expected = std::path::PathBuf::from("/home/alice")
+        .join(".config")
+        .join("grok-search-rs")
+        .join("config.toml");
+    assert_eq!(path, expected);
+}
+
+#[test]
+fn config_path_falls_back_to_userprofile_when_home_missing() {
+    let path = config::config_path_for([("USERPROFILE", "C:\\Users\\chen")])
+        .expect("USERPROFILE must produce a path on Windows-style env");
+    let expected = std::path::PathBuf::from("C:\\Users\\chen")
+        .join(".config")
+        .join("grok-search-rs")
+        .join("config.toml");
+    assert_eq!(path, expected);
+}
+
+#[test]
+fn config_path_prefers_home_over_userprofile_when_both_set() {
+    let path = config::config_path_for([
+        ("HOME", "/home/alice"),
+        ("USERPROFILE", "C:\\Users\\chen"),
+    ])
+    .expect("must resolve");
+    assert!(
+        path.starts_with("/home/alice"),
+        "HOME should win, got {}",
+        path.display()
+    );
+}
+
+#[test]
+fn config_path_none_when_no_env_set() {
+    let env: [(&str, &str); 0] = [];
+    assert!(config::config_path_for(env).is_none());
+}

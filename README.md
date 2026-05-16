@@ -323,17 +323,25 @@ GROK_SEARCH_X_SEARCH=true       # optional
 
 ### 🗂 Global config file (set once, reuse across clients)
 
-Tired of duplicating `env` blocks in every client's MCP config? Run `grok-search-rs --init` to scaffold `~/.config/grok-search-rs/config.toml`, fill in your keys, and every client can shrink to just `{"command": "grok-search-rs"}`.
+Tired of duplicating `env` blocks in every client's MCP config? Run `grok-search-rs --init` to scaffold `<home>/.config/grok-search-rs/config.toml`, fill in your keys, and every client can shrink to just `{"command": "grok-search-rs"}`. Works the same on macOS, Linux, and Windows — no shell variables to set.
 
 ```bash
 grok-search-rs --init       # scaffold template (idempotent, never overwrites)
 $EDITOR ~/.config/grok-search-rs/config.toml
 ```
 
+PowerShell:
+
+```powershell
+grok-search-rs --init
+notepad $env:USERPROFILE\.config\grok-search-rs\config.toml
+```
+
 **Path** (auto‑detected):
 
-1. `$GROK_SEARCH_CONFIG` — explicit override path.
-2. `~/.config/grok-search-rs/config.toml` — default.
+1. `$GROK_SEARCH_CONFIG` — explicit override path (any platform).
+2. `$HOME/.config/grok-search-rs/config.toml` — Unix, macOS, Git Bash.
+3. `%USERPROFILE%\.config\grok-search-rs\config.toml` — native Windows shells.
 
 **Precedence**: client `env` block **>** config file **>** built‑in defaults. So a per‑client `env` can still override the file when you want a one‑off model.
 

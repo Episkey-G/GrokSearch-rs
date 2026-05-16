@@ -8,6 +8,12 @@ All notable changes to GrokSearch-rs are documented here.
 
 - OpenAI-compatible chat/completions transport (`OPENAI_COMPATIBLE_API_URL` / `_KEY` / `_MODEL`). When `GROK_SEARCH_API_KEY` is unset and the new triple is set, the client talks to `/v1/chat/completions` instead of `/v1/responses`. Source extraction covers OpenAI annotations, Perplexity-style citations, top-level `search_sources`, and inline `[[n]](url)` markers.
 - `Config::transport` enum (`Responses` | `ChatCompletions`) decided at startup from the configured env-var groups.
+- 跨平台配置路径解析：Windows（PowerShell / cmd）下自动回退到 `%USERPROFILE%\.config\grok-search-rs\config.toml`，无需再手动设置 `$env:HOME`。Unix / macOS / Git Bash 沿用 `$HOME/.config/...`，行为零变化。`grok-search-rs --init` 在三平台均一键直跑。
+- `config::config_path_for(env_map)` 公共测试入口，便于注入式断言跨平台路径解析。
+
+### Fixed
+
+- Windows 下 `grok-search-rs --init` 报错 `cannot resolve config path: HOME is unset...` —— 根因是 PowerShell/cmd 默认无 `HOME` 变量，现已改为优先 `HOME`、回退 `USERPROFILE`，错误信息同步更新。
 
 ### Notes
 
