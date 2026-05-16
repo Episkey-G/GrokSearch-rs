@@ -3,7 +3,7 @@
 GrokSearch-rs reads configuration from two sources, merged with the following precedence:
 
 1. **Process environment variables** (highest — what your MCP client passes in `env`).
-2. **Global TOML config file** — `$GROK_SEARCH_CONFIG` if set, otherwise `~/.config/grok-search-rs/config.toml`.
+2. **Global TOML config file** — `$GROK_SEARCH_CONFIG` if set, otherwise `<home>/.config/grok-search-rs/config.toml` on every platform. `<home>` is `$HOME` on Unix / Git Bash, `%USERPROFILE%` on native Windows shells (PowerShell, cmd).
 3. **Built-in defaults** (lowest).
 
 The config file is optional; missing files are skipped silently. See the [Config file](#config-file) section below for the TOML schema. The AI provider contract is intentionally narrow: configure a Grok/OpenAI-compatible root URL and the server calls `/v1/responses`.
@@ -59,7 +59,15 @@ The example above calls `https://api.modelverse.cn/v1/responses`.
 
 ## Config file
 
-Drop a TOML file at `~/.config/grok-search-rs/config.toml` (or any path pointed to by `GROK_SEARCH_CONFIG`) to set defaults once and skip the per-client `env` block. Process env still wins, so individual clients can override any field at runtime.
+Drop a TOML file at `<home>/.config/grok-search-rs/config.toml` (or any path pointed to by `GROK_SEARCH_CONFIG`) to set defaults once and skip the per-client `env` block. Process env still wins, so individual clients can override any field at runtime.
+
+Resolved per platform:
+
+- **macOS / Linux**: `$HOME/.config/grok-search-rs/config.toml` — e.g. `/Users/alice/.config/grok-search-rs/config.toml`.
+- **Windows (PowerShell / cmd)**: `%USERPROFILE%\.config\grok-search-rs\config.toml` — e.g. `C:\Users\chen\.config\grok-search-rs\config.toml`.
+- **Windows (Git Bash / MSYS)**: same as Unix — `$HOME/.config/grok-search-rs/config.toml`.
+
+`grok-search-rs --init` picks the right path automatically; no platform-specific shell setup required.
 
 ### Scaffolding the file — `--init`
 

@@ -36,7 +36,8 @@ async fn main() -> anyhow::Result<()> {
 fn run_init() -> anyhow::Result<()> {
     let path = config::config_path().ok_or_else(|| {
         anyhow::anyhow!(
-            "cannot resolve config path: HOME is unset and GROK_SEARCH_CONFIG is not provided"
+            "cannot resolve config path: set GROK_SEARCH_CONFIG to an explicit file path, \
+             or ensure HOME (Unix / Git Bash) or USERPROFILE (Windows) is set"
         )
     })?;
     match config::write_template(&path)? {

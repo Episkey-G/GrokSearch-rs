@@ -103,7 +103,9 @@ impl ConfigFile {
 
 impl Config {
     /// Load config with full precedence chain: process env > config file > defaults.
-    /// Config file path: `$GROK_SEARCH_CONFIG` if set, else `~/.config/grok-search-rs/config.toml`.
+    /// Config file path: `$GROK_SEARCH_CONFIG` if set, else
+    /// `<home>/.config/grok-search-rs/config.toml`, where `<home>` is `$HOME`
+    /// on Unix / Git Bash and `%USERPROFILE%` on native Windows shells.
     /// Missing or unparseable files are skipped silently (env-only mode).
     pub fn load() -> Self {
         Self::load_from(std::env::vars())
@@ -191,20 +193,53 @@ fn resolve_config_path(env: &HashMap<String, String>) -> Option<PathBuf> {
     if let Some(explicit) = env.get("GROK_SEARCH_CONFIG").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(explicit));
     }
-    let home = env.get("HOME").filter(|v| !v.is_empty())?;
+    let home = resolve_home_dir(env)?;
     Some(
-        Path::new(home)
-            .join(".config")
+        home.join(".config")
             .join("grok-search-rs")
             .join("config.toml"),
     )
 }
 
-/// Resolved config file path using process env (`$GROK_SEARCH_CONFIG` or
-/// `~/.config/grok-search-rs/config.toml`). `None` when `HOME` is unset and no
-/// explicit path is provided.
+/// Cross-platform home directory resolution. Reads `$HOME` first (Unix and
+/// Git Bash / MSYS on Windows both set it), then falls back to
+/// `%USERPROFILE%` for native Windows shells (PowerShell, cmd) where `HOME`
+/// is not part of the default environment. Env-driven so tests can inject
+/// either layout without touching real process env.
+fn resolve_home_dir(env: &HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(home) = env.get("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = env.get("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
+    None
+}
+
+/// Resolved config file path using process env. Precedence:
+/// 1. `$GROK_SEARCH_CONFIG` (any platform, explicit override)
+/// 2. `$HOME/.config/grok-search-rs/config.toml` (Unix / Git Bash)
+/// 3. `%USERPROFILE%\.config\grok-search-rs\config.toml` (native Windows)
+///
+/// Returns `None` only when none of the above are set.
 pub fn config_path() -> Option<PathBuf> {
     let env: HashMap<String, String> = std::env::vars().collect();
+    resolve_config_path(&env)
+}
+
+/// Test-friendly variant of [`config_path`] that takes an explicit env map.
+/// Lets integration tests assert path resolution across platforms without
+/// mutating process-global env state.
+pub fn config_path_for<I, K, V>(env_vars: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let env: HashMap<String, String> = env_vars
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
     resolve_config_path(&env)
 }
 
@@ -232,7 +267,10 @@ pub fn write_template(path: &Path) -> std::io::Result<InitOutcome> {
 /// Embedded TOML template. All keys are commented so an empty scaffold cannot
 /// silently override built-in defaults; the user uncomments only what they need.
 pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
-# Path: ~/.config/grok-search-rs/config.toml  (or $GROK_SEARCH_CONFIG)
+# Default path:
+#   Unix / macOS / Git Bash:   $HOME/.config/grok-search-rs/config.toml
+#   Windows (PowerShell/cmd):  %USERPROFILE%\.config\grok-search-rs\config.toml
+# Override anywhere with $GROK_SEARCH_CONFIG=/abs/path/to/config.toml
 #
 # Precedence: process env > this file > built-in defaults.
 # All keys below are commented out; uncomment and fill what you need.
