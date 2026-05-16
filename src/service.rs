@@ -99,18 +99,52 @@ pub struct SearchService {
 
 impl SearchService {
     pub fn new(config: Config) -> Result<Self> {
-        let grok_key = config
-            .grok_api_key
-            .clone()
-            .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?;
+        use crate::config::Transport;
         let http = crate::providers::http::build_client(config.timeout);
-        let ai: Arc<dyn AiProvider> = Arc::new(GrokResponsesProvider::with_client(
-            http.clone(),
-            config.grok_api_url.clone(),
-            grok_key,
-            config.web_search_enabled,
-            config.x_search_enabled,
-        ));
+
+        let ai: Arc<dyn AiProvider> = match config.transport {
+            Transport::Responses => {
+                let grok_key = config
+                    .grok_api_key
+                    .clone()
+                    .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?;
+                Arc::new(GrokResponsesProvider::with_client(
+                    http.clone(),
+                    config.grok_api_url.clone(),
+                    grok_key,
+                    config.web_search_enabled,
+                    config.x_search_enabled,
+                ))
+            }
+            Transport::ChatCompletions => {
+                let url = config
+                    .openai_compatible_api_url
+                    .clone()
+                    .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_URL"))?;
+                let key = config
+                    .openai_compatible_api_key
+                    .clone()
+                    .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_KEY"))?;
+                let model = config
+                    .openai_compatible_model
+                    .clone()
+                    .unwrap_or_else(|| config.grok_model.clone());
+                if config.x_search_enabled {
+                    eprintln!(
+                        "grok-search-rs: x_search_enabled is ignored when using OPENAI_COMPATIBLE_* transport"
+                    );
+                }
+                Arc::new(
+                    crate::providers::openai_compatible::OpenAICompatProvider::with_client(
+                        http.clone(),
+                        url,
+                        key,
+                        model,
+                        config.web_search_enabled,
+                    ),
+                )
+            }
+        };
 
         let sources = if config.tavily_enabled {
             config.tavily_api_key.clone().map(|key| {
@@ -671,5 +705,35 @@ impl SourceProvider for FakeSourceProvider {
         Ok((0..max_results)
             .map(|idx| Source::new(format!("{url}/page-{idx}"), "tavily"))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod transport_dispatch_tests {
+    use super::*;
+    use crate::config::Transport;
+
+    #[test]
+    fn service_constructs_for_chat_completions_transport() {
+        let config = Config::from_env_map([
+            ("OPENAI_COMPATIBLE_API_URL", "https://example.com/v1"),
+            ("OPENAI_COMPATIBLE_API_KEY", "sk-fake"),
+            ("OPENAI_COMPATIBLE_MODEL", "grok-4.3-fast"),
+            ("TAVILY_API_KEY", "fake-tavily"),
+        ]);
+        assert_eq!(config.transport, Transport::ChatCompletions);
+        let svc = SearchService::new(config).expect("service should build");
+        // Smoke: just ensure construction doesn't blow up. The actual provider
+        // type is hidden behind Arc<dyn AiProvider>; we verify behavior in the
+        // ignored e2e probe (Task 7) and adapter unit tests (Tasks 3-4).
+        drop(svc);
+    }
+
+    #[test]
+    fn service_rejects_chat_completions_without_url() {
+        let config = Config::from_env_map([("OPENAI_COMPATIBLE_API_KEY", "sk-fake")]);
+        // url missing -> falls back to Responses transport, which then needs
+        // GROK_SEARCH_API_KEY which is also missing -> MissingConfig.
+        assert!(SearchService::new(config).is_err());
     }
 }
