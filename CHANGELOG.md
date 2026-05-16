@@ -4,6 +4,8 @@ All notable changes to GrokSearch-rs are documented here.
 
 ## Unreleased
 
+## 0.1.11 - 2026-05-16
+
 ### Added
 
 - OpenAI-compatible chat/completions transport (`OPENAI_COMPATIBLE_API_URL` / `_KEY` / `_MODEL`). When `GROK_SEARCH_API_KEY` is unset and the new triple is set, the client talks to `/v1/chat/completions` instead of `/v1/responses`. Source extraction covers OpenAI annotations, Perplexity-style citations, top-level `search_sources`, and inline `[[n]](url)` markers.
@@ -13,6 +15,7 @@ All notable changes to GrokSearch-rs are documented here.
 
 ### Fixed
 
+- `SearchService::build_search_request` 过去把 `config.grok_model` 硬塞进每个 `SearchRequest`，导致 ChatCompletions transport 下 `OPENAI_COMPATIBLE_MODEL` 被悄悄屏蔽——网关收到的是 Grok 专属模型 ID。`doctor()` 也同病，硬编 `"grok_responses"` 与 `grok_model`。现改为构造期由 `config.transport` 一次性解析 `default_model`（Responses → `grok_model`；ChatCompletions → `openai_compatible_model`，缺省回落 `grok_model`），`build_search_request` / `probe_grok` / `doctor()` 统一复用；`WebSearchInput.model` 显式覆盖仍优先。`doctor()` 同步按 transport 返回真实 `api_url` 与强制 `x_search_enabled=false`（该 flag 在 chat 路径本就被忽略）。
 - Windows 下 `grok-search-rs --init` 报错 `cannot resolve config path: HOME is unset...` —— 根因是 PowerShell/cmd 默认无 `HOME` 变量，现已改为优先 `HOME`、回退 `USERPROFILE`，错误信息同步更新。
 
 ### Notes
