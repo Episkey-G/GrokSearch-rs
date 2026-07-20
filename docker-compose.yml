@@ -1,0 +1,45 @@
+# One-command deploy: grok-search-rs behind Caddy with automatic HTTPS.
+#
+#   MCP_HOSTNAME=your-domain.example.com docker compose up -d --build
+#
+# Set MCP_HOSTNAME to your own domain (A record -> your server IP) or your VPS's
+# dash-joined-IP sslip.io name (e.g. 203-0-113-5.sslip.io). Keep it out of the
+# repo — pass it via the environment or a local .env file (git-ignored).
+#
+# Endpoint: https://<MCP_HOSTNAME>/groksearch_rs/mcp — each user supplies their
+# OWN keys as request headers (X-Grok-Api-Key / X-Tavily-Api-Key / X-Firecrawl-Api-Key).
+services:
+  grok-search-rs:
+    build: .
+    image: grok-search-rs:latest
+    restart: unless-stopped
+    environment:
+      GROK_MCP_BIND: "0.0.0.0:8080"
+      # Operator NON-secret defaults only (e.g. a fixed Grok-compatible gateway):
+      #   GROK_SEARCH_URL: "https://api.x.ai/v1"
+      # NEVER put *_API_KEY here — credentials come from per-request headers, and
+      # the server strips any server-side keys from the per-request config.
+    expose:
+      - "8080"
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - grok-search-rs
+    environment:
+      MCP_HOSTNAME: "${MCP_HOSTNAME:-localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -125,9 +125,12 @@ fn config_redacts_grok_tavily_and_firecrawl_keys() {
     ]);
 
     let info = cfg.redacted_diagnostics();
-    assert!(info.contains("grok"));
-    assert!(info.contains("tvly"));
-    assert!(info.contains("fc-a"));
+    // Secrets are reported only as a two-state set/unset marker — never any
+    // fragment of the value (no prefix or suffix), so diagnostics are safe to
+    // surface on a public endpoint.
+    assert!(info.contains("grok_api_key=set"));
+    assert!(info.contains("tavily_api_key=set"));
+    assert!(info.contains("firecrawl_api_key=set"));
     assert!(!info.contains("1234567890"));
     assert!(!info.contains("abcdefghi"));
 }
@@ -439,7 +442,7 @@ fn config_path_none_when_no_env_set() {
 fn response_budget_defaults_and_env_overrides() {
     let defaults = Config::from_env_map([] as [(&str, &str); 0]);
     assert_eq!(defaults.max_inline_sources, 5);
-    assert_eq!(defaults.response_max_chars, 60_000);
+    assert_eq!(defaults.response_max_chars, 45_000);
 
     let overridden = Config::from_env_map([
         ("GROK_SEARCH_MAX_INLINE_SOURCES", "2"),

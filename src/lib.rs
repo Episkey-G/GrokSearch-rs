@@ -3,6 +3,8 @@ pub mod cache;
 pub mod config;
 pub mod credentials;
 pub mod error;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod logging;
 pub mod mcp;
 pub mod model;

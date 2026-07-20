@@ -2,8 +2,29 @@ use std::io::{IsTerminal, Write};
 
 use grok_search_rs::config::{self, AuthMode, Config, InitOutcome};
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    build_runtime()?.block_on(async_main())
+}
+
+/// Multi-threaded runtime for the concurrent HTTP server build.
+#[cfg(feature = "http")]
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+}
+
+/// Single-threaded runtime for the default stdio build — mirrors the previous
+/// `#[tokio::main(flavor = "current_thread")]` so the stdio path is unchanged.
+#[cfg(not(feature = "http"))]
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // CLI shim: handle --version, --init before MCP server mode.
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -32,6 +53,25 @@ async fn main() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("logout") {
         let cfg = Config::load();
         return run_logout(&cfg);
+    }
+
+    // Native Streamable HTTP transport (feature `http`): opt in with `--http` /
+    // `serve`, or GROK_MCP_BIND=host:port. Credentials come only from
+    // per-request headers, so this path intentionally ignores server-side keys.
+    // stdio stays the default when neither is set — local users are unaffected.
+    #[cfg(feature = "http")]
+    {
+        let wants_http = args.iter().any(|a| a == "--http" || a == "serve");
+        let bind_env = std::env::var("GROK_MCP_BIND").ok();
+        if wants_http || bind_env.is_some() {
+            let addr = bind_env.unwrap_or_else(|| "127.0.0.1:8080".to_string());
+            let bind: std::net::SocketAddr = addr
+                .parse()
+                .map_err(|err| anyhow::anyhow!("invalid GROK_MCP_BIND '{addr}': {err}"))?;
+            let base_env: std::collections::HashMap<String, String> =
+                std::env::vars().collect();
+            return grok_search_rs::http::run_http(base_env, bind).await;
+        }
     }
 
     let cfg = Config::load();

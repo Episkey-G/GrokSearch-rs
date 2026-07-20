@@ -32,7 +32,31 @@ pub async fn run_stdio(service: SearchService) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_message(service: &SearchService, request: Value) -> Option<Value> {
+/// Protocol revisions this server speaks, newest first. `initialize` echoes the
+/// client's requested version when it is one of these — so existing stdio
+/// clients that still request "2024-11-05" keep getting "2024-11-05" — and
+/// otherwise declares [`LATEST_PROTOCOL_VERSION`].
+pub(crate) const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Latest revision we support; declared when the client requests nothing or an
+/// unsupported version.
+pub(crate) const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Pick the protocol revision to declare in the `initialize` result: the
+/// client's requested revision when supported, else our latest.
+pub(crate) fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(req) => SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .find(|version| **version == req)
+            .copied()
+            .unwrap_or(LATEST_PROTOCOL_VERSION),
+        None => LATEST_PROTOCOL_VERSION,
+    }
+}
+
+pub(crate) async fn handle_message(service: &SearchService, request: Value) -> Option<Value> {
     request.get("id")?;
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     Some(
@@ -53,19 +77,28 @@ async fn handle_request(service: &SearchService, request: Value) -> Result<Value
         .ok_or_else(|| GrokSearchError::InvalidParams("missing method".to_string()))?;
 
     match method {
-        "initialize" => Ok(success_response(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "grok-search-rs",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "tools": {}
-                }
-            }),
-        )),
+        "initialize" => {
+            // Negotiate: echo the client's requested revision when we speak it
+            // (keeps existing stdio clients that still ask for "2024-11-05"
+            // working), otherwise declare our latest supported revision.
+            let requested = request
+                .get("params")
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(Value::as_str);
+            Ok(success_response(
+                id,
+                json!({
+                    "protocolVersion": negotiate_protocol_version(requested),
+                    "serverInfo": {
+                        "name": "grok-search-rs",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities": {
+                        "tools": {}
+                    }
+                }),
+            ))
+        }
         "ping" => Ok(success_response(id, json!({}))),
         "tools/list" => Ok(success_response(id, tools_list())),
         "tools/call" => {
@@ -320,7 +353,7 @@ fn success_response(id: Value, result: Value) -> Value {
     })
 }
 
-fn error_response(id: Value, code: i64, message: String) -> Value {
+pub(crate) fn error_response(id: Value, code: i64, message: String) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -349,6 +382,59 @@ mod tests {
         .await;
 
         assert_eq!(response, None);
+    }
+
+    #[test]
+    fn negotiate_protocol_version_prefers_supported_client_version() {
+        // Backward compatibility: an old client asking for 2024-11-05 is echoed.
+        assert_eq!(negotiate_protocol_version(Some("2024-11-05")), "2024-11-05");
+        assert_eq!(negotiate_protocol_version(Some("2025-06-18")), "2025-06-18");
+        assert_eq!(negotiate_protocol_version(Some("2025-11-25")), "2025-11-25");
+        // Unknown / absent -> our latest.
+        assert_eq!(
+            negotiate_protocol_version(Some("1999-01-01")),
+            LATEST_PROTOCOL_VERSION
+        );
+        assert_eq!(negotiate_protocol_version(None), LATEST_PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_legacy_client_version() {
+        let service = SearchService::fake_with_sources();
+        let response = handle_request(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05", "capabilities": {} }
+            }),
+        )
+        .await
+        .expect("initialize response");
+        // An existing stdio client must still see its own requested revision.
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(response["result"]["serverInfo"]["name"], "grok-search-rs");
+    }
+
+    #[tokio::test]
+    async fn initialize_declares_latest_for_unknown_version() {
+        let service = SearchService::fake_with_sources();
+        let response = handle_request(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": { "protocolVersion": "3000-01-01", "capabilities": {} }
+            }),
+        )
+        .await
+        .expect("initialize response");
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            LATEST_PROTOCOL_VERSION
+        );
     }
 
     #[tokio::test]

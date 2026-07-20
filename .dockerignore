@@ -1,0 +1,11 @@
+target
+.git
+.github
+docs
+*.md
+!README.md
+.claude
+
+# Local env files (may hold secrets) — never send them to the build context
+.env
+.env.*

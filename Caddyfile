@@ -1,0 +1,29 @@
+# Caddy site for the docker-compose deploy. Automatic HTTPS via Let's Encrypt.
+# Gateway-style path routing: each backend service lives under its own path
+# prefix, so a single host can front many MCP (and other) services.
+#
+# Set MCP_HOSTNAME (in a .env file or the environment) to your own domain, or to
+# your VPS's dash-joined-IP sslip.io name, e.g. 203-0-113-5.sslip.io for
+# 203.0.113.5. It defaults to localhost (a safe internal cert) until you set it.
+{$MCP_HOSTNAME:localhost} {
+	encode zstd gzip
+
+	# grok-search-rs MCP — reachable at /groksearch_rs/mcp
+	# (handle_path strips the /groksearch_rs prefix before proxying to /mcp).
+	handle_path /groksearch_rs/* {
+		reverse_proxy grok-search-rs:8080
+	}
+
+	# Backward-compatible bare endpoint: /mcp still reaches grok-search-rs.
+	handle /mcp* {
+		reverse_proxy grok-search-rs:8080
+	}
+
+	# Add more services under their own prefixes, e.g.:
+	#   handle_path /another_service/* { reverse_proxy another_service:8080 }
+
+	# Unknown paths -> 404 (instead of Caddy's default empty 200).
+	handle {
+		respond "not found" 404
+	}
+}

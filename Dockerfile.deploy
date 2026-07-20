@@ -1,0 +1,14 @@
+# Runtime-only image: copies a pre-built static musl binary (no in-container
+# compile), so it builds instantly even on a 1 GB box. Build the binary first
+# on a capable machine:
+#   cargo zigbuild --profile release-http --features http --target x86_64-unknown-linux-musl
+# then place target/.../release-http/grok-search-rs next to this file and:
+#   docker build -f Dockerfile.deploy -t grok-search-rs:deploy .
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -H -s /sbin/nologin grokmcp
+COPY grok-search-rs /usr/local/bin/grok-search-rs
+ENV GROK_MCP_BIND=0.0.0.0:8080
+EXPOSE 8080
+USER grokmcp
+ENTRYPOINT ["grok-search-rs", "--http"]

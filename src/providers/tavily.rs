@@ -34,9 +34,15 @@ impl KeyRing {
         if keys.is_empty() {
             keys.push(raw.to_string());
         }
+        // Start at a random offset. On the HTTP transport the provider (and this
+        // ring) is rebuilt per request, so a fixed start of 0 would make every
+        // request begin on the first key and concentrate load there. A random
+        // start spreads load across keys statelessly; stdio keeps its persistent
+        // round-robin (the random start is just a one-time offset).
+        let start = random_offset(keys.len());
         Self {
             keys,
-            cursor: AtomicUsize::new(0),
+            cursor: AtomicUsize::new(start),
         }
     }
 
@@ -52,6 +58,19 @@ impl KeyRing {
 
     fn key(&self, index: usize) -> &str {
         &self.keys[index % self.keys.len()]
+    }
+}
+
+/// A best-effort random starting offset in `0..len` (falls back to 0 if the RNG
+/// is unavailable). Only meaningful for multi-key rings.
+fn random_offset(len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let mut buf = [0u8; 8];
+    match getrandom::fill(&mut buf) {
+        Ok(()) => (u64::from_ne_bytes(buf) % len as u64) as usize,
+        Err(_) => 0,
     }
 }
 
@@ -280,10 +299,20 @@ mod key_ring_tests {
 
     #[test]
     fn start_rotates_round_robin_across_requests() {
+        // The starting key is randomized per ring, but consecutive starts still
+        // advance by one and wrap — round-robin is preserved.
         let ring = KeyRing::parse("a,b,c");
+        let first = ring.start();
+        assert_eq!(ring.start(), (first + 1) % 3);
+        assert_eq!(ring.start(), (first + 2) % 3);
+        assert_eq!(ring.start(), (first + 3) % 3);
+    }
+
+    #[test]
+    fn single_key_ring_always_starts_at_zero() {
+        // A single-key ring has a deterministic (0) start — no randomization.
+        let ring = KeyRing::parse("solo");
         assert_eq!(ring.start(), 0);
-        assert_eq!(ring.start(), 1);
-        assert_eq!(ring.start(), 2);
         assert_eq!(ring.start(), 0);
     }
 
@@ -299,9 +328,11 @@ mod key_ring_tests {
         let provider =
             TavilyProvider::with_client(Client::new(), "https://api.tavily.com", "tvly-a,tvly-b");
         let clone = provider.clone();
-        assert_eq!(provider.keys.start(), 0);
-        assert_eq!(clone.keys.start(), 1);
-        assert_eq!(provider.keys.start(), 0);
+        // The cursor is shared (Arc): the clone continues the sequence rather
+        // than restarting, regardless of the randomized starting offset.
+        let a = provider.keys.start();
+        assert_eq!(clone.keys.start(), (a + 1) % 2);
+        assert_eq!(provider.keys.start(), (a + 2) % 2);
     }
 
     #[test]

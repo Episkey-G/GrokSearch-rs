@@ -20,6 +20,85 @@ pub fn build_client(timeout: Duration) -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
+/// True if `ip` is a globally-routable public address. Rejects loopback,
+/// private, link-local (incl. cloud metadata 169.254.169.254), CGNAT,
+/// unspecified, multicast, broadcast, and documentation ranges — for both IPv4
+/// and IPv6 (including IPv4-mapped IPv6). Used by the public HTTP transport's
+/// SSRF guard; gated to that build so it is never dead code in the stdio build.
+#[cfg(feature = "http")]
+pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                // CGNAT 100.64.0.0/10
+                || (o[0] == 100 && (o[1] & 0xc0) == 64))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(&IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // unique local fc00::/7
+                || (seg0 & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (seg0 & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Like [`build_client`] but rejects redirects to private/loopback IP-literal
+/// targets (defense-in-depth against redirect-based SSRF) and caps redirect
+/// depth. Used only by the public HTTP transport.
+#[cfg(feature = "http")]
+pub fn build_restricted_client(timeout: Duration) -> Client {
+    use reqwest::redirect::Policy;
+    Client::builder()
+        .timeout(timeout)
+        .gzip(true)
+        .pool_idle_timeout(Some(Duration::from_secs(90)))
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .tcp_nodelay(true)
+        .redirect(Policy::custom(|attempt| {
+            use std::net::ToSocketAddrs;
+            if attempt.previous().len() > 5 {
+                return attempt.error("too many redirects");
+            }
+            let Some(host) = attempt.url().host_str() else {
+                return attempt.follow();
+            };
+            // Reject redirects that target — or resolve to — a non-public
+            // address. Covers IP literals AND hostnames, closing redirect-based
+            // SSRF / DNS-rebinding (a public URL that 30x's to an internal name).
+            let ips: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+                Ok(ip) => vec![ip],
+                Err(_) => {
+                    let port = attempt.url().port_or_known_default().unwrap_or(443);
+                    match (host, port).to_socket_addrs() {
+                        Ok(addrs) => addrs.map(|addr| addr.ip()).collect(),
+                        Err(_) => return attempt.error("redirect host did not resolve"),
+                    }
+                }
+            };
+            if ips.iter().any(|ip| !is_public_ip(ip)) {
+                return attempt.error("redirect to a non-public address is blocked");
+            }
+            attempt.follow()
+        }))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
 /// Failure from [`post_json_with_status`]. `status` is the upstream HTTP
 /// status when the request reached the server and came back non-2xx; `None`
 /// for transport, timeout, body-read, and parse failures. Lets callers make

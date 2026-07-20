@@ -111,108 +111,217 @@ pub struct SearchService {
     source_router: Arc<crate::sources::SourceRouter>,
 }
 
+/// The credential-derived half of a [`SearchService`]: everything that must be
+/// rebuilt when the caller's keys change. [`build_providers`] constructs these
+/// from a [`Config`]; [`SearchService::new`] uses it with a process-wide config
+/// (the stdio path), and [`SearchService::with_config`] uses it per request
+/// while sharing the long-lived HTTP client and source cache.
+struct ProviderSet {
+    ai: Arc<dyn AiProvider>,
+    default_model: String,
+    sources: Option<Arc<dyn SourceProvider>>,
+    fallback_sources: Option<Arc<dyn SourceProvider>>,
+    source_router: Arc<crate::sources::SourceRouter>,
+}
+
+/// Build the credential-bearing providers for a given `config`, reusing the
+/// caller-supplied shared `http` client. Extracted verbatim from the original
+/// `SearchService::new` body so both the process-wide (stdio) and per-request
+/// (HTTP) construction paths share one implementation.
+fn build_providers(config: &Config, http: &reqwest::Client) -> Result<ProviderSet> {
+    use crate::config::Transport;
+
+    let ai: Arc<dyn AiProvider> = match config.transport {
+        Transport::Responses => {
+            let credential: Arc<dyn crate::credentials::CredentialProvider> =
+                match config.grok_auth_mode {
+                    AuthMode::ApiKey => Arc::new(StaticApiKeyCredential::new(
+                        config
+                            .grok_api_key
+                            .clone()
+                            .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?,
+                    )),
+                    AuthMode::OAuth => {
+                        let auth_path = config
+                            .grok_auth_file
+                            .clone()
+                            .or_else(crate::config::auth_path)
+                            .ok_or_else(|| {
+                                GrokSearchError::OAuth(
+                                    "oauth_auth_path_unavailable: set GROK_SEARCH_AUTH_FILE"
+                                        .to_string(),
+                                )
+                            })?;
+                        Arc::new(OAuthCredential::new(http.clone(), auth_path))
+                    }
+                };
+            Arc::new(GrokResponsesProvider::with_credential_client(
+                http.clone(),
+                config.grok_api_url.clone(),
+                credential,
+                config.web_search_enabled,
+                config.x_search_enabled,
+            ))
+        }
+        Transport::ChatCompletions => {
+            let url = config
+                .openai_compatible_api_url
+                .clone()
+                .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_URL"))?;
+            let key = config
+                .openai_compatible_api_key
+                .clone()
+                .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_KEY"))?;
+            let model = config
+                .openai_compatible_model
+                .clone()
+                .unwrap_or_else(|| config.grok_model.clone());
+            if config.x_search_enabled {
+                eprintln!(
+                    "grok-search-rs: x_search_enabled is ignored when using OPENAI_COMPATIBLE_* transport"
+                );
+            }
+            Arc::new(
+                crate::providers::openai_compatible::OpenAICompatProvider::with_client(
+                    http.clone(),
+                    url,
+                    key,
+                    model,
+                    config.web_search_enabled,
+                ),
+            )
+        }
+    };
+
+    let sources = if config.tavily_enabled {
+        config.tavily_api_key.clone().map(|key| {
+            Arc::new(TavilyProvider::with_client(
+                http.clone(),
+                config.tavily_api_url.clone(),
+                key,
+            )) as Arc<dyn SourceProvider>
+        })
+    } else {
+        None
+    };
+
+    let fallback_sources = if config.firecrawl_enabled {
+        config.firecrawl_api_key.clone().map(|key| {
+            Arc::new(FirecrawlProvider::with_client(
+                http.clone(),
+                config.firecrawl_api_url.clone(),
+                key,
+            )) as Arc<dyn SourceProvider>
+        })
+    } else {
+        None
+    };
+
+    let source_router = Arc::new(crate::sources::SourceRouter::from_config(config));
+
+    Ok(ProviderSet {
+        ai,
+        default_model: resolve_default_model(config),
+        sources,
+        fallback_sources,
+        source_router,
+    })
+}
+
+/// Non-reversible per-tenant namespace tag derived from the caller's primary
+/// key. Cache entries are stored under `tag:session_id` so one tenant can never
+/// read another tenant's cached `get_sources` pages on the shared HTTP process.
+/// For stdio (a single process key) the tag is constant, so behavior is
+/// unchanged. Uses a SHA-256 prefix — never any fragment of the raw key.
+fn tenant_tag(config: &Config) -> String {
+    let material = config
+        .grok_api_key
+        .as_deref()
+        .or(config.openai_compatible_api_key.as_deref())
+        .unwrap_or("");
+    if material.is_empty() {
+        return "anon".to_string();
+    }
+    let digest = ring::digest::digest(&ring::digest::SHA256, material.as_bytes());
+    digest.as_ref()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 impl SearchService {
     pub fn new(config: Config) -> Result<Self> {
-        use crate::config::Transport;
         let http = crate::providers::http::build_client(config.timeout);
+        let providers = build_providers(&config, &http)?;
+        let cache = Arc::new(Mutex::new(SourceCache::new(config.cache_size)));
+        Ok(Self::from_parts(config, http, cache, providers))
+    }
 
-        let ai: Arc<dyn AiProvider> = match config.transport {
-            Transport::Responses => {
-                let credential: Arc<dyn crate::credentials::CredentialProvider> =
-                    match config.grok_auth_mode {
-                        AuthMode::ApiKey => Arc::new(StaticApiKeyCredential::new(
-                            config
-                                .grok_api_key
-                                .clone()
-                                .ok_or(GrokSearchError::MissingConfig("GROK_SEARCH_API_KEY"))?,
-                        )),
-                        AuthMode::OAuth => {
-                            let auth_path = config
-                                .grok_auth_file
-                                .clone()
-                                .or_else(crate::config::auth_path)
-                                .ok_or_else(|| {
-                                    GrokSearchError::OAuth(
-                                        "oauth_auth_path_unavailable: set GROK_SEARCH_AUTH_FILE"
-                                            .to_string(),
-                                    )
-                                })?;
-                            Arc::new(OAuthCredential::new(http.clone(), auth_path))
-                        }
-                    };
-                Arc::new(GrokResponsesProvider::with_credential_client(
-                    http.clone(),
-                    config.grok_api_url.clone(),
-                    credential,
-                    config.web_search_enabled,
-                    config.x_search_enabled,
-                ))
-            }
-            Transport::ChatCompletions => {
-                let url = config
-                    .openai_compatible_api_url
-                    .clone()
-                    .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_URL"))?;
-                let key = config
-                    .openai_compatible_api_key
-                    .clone()
-                    .ok_or(GrokSearchError::MissingConfig("OPENAI_COMPATIBLE_API_KEY"))?;
-                let model = config
-                    .openai_compatible_model
-                    .clone()
-                    .unwrap_or_else(|| config.grok_model.clone());
-                if config.x_search_enabled {
-                    eprintln!(
-                        "grok-search-rs: x_search_enabled is ignored when using OPENAI_COMPATIBLE_* transport"
-                    );
-                }
-                Arc::new(
-                    crate::providers::openai_compatible::OpenAICompatProvider::with_client(
-                        http.clone(),
-                        url,
-                        key,
-                        model,
-                        config.web_search_enabled,
-                    ),
-                )
-            }
-        };
+    /// Build a request-scoped service that reuses this service's shared HTTP
+    /// client and source cache, but derives every credential-bearing provider
+    /// from `config`. The HTTP transport calls this per request so each caller
+    /// searches with their own keys while the process keeps a single source
+    /// cache — so `get_sources` continuation still works across requests.
+    ///
+    /// OAuth is rejected here: it resolves a single on-disk identity and is
+    /// incompatible with per-request, multi-tenant credentials. HTTP callers
+    /// must pass an API key. The local stdio path keeps OAuth via [`new`].
+    ///
+    /// [`new`]: SearchService::new
+    pub fn with_config(&self, config: Config) -> Result<Self> {
+        Self::for_request(self.http_client.clone(), self.cache.clone(), config)
+    }
 
-        let sources = if config.tavily_enabled {
-            config.tavily_api_key.clone().map(|key| {
-                Arc::new(TavilyProvider::with_client(
-                    http.clone(),
-                    config.tavily_api_url.clone(),
-                    key,
-                )) as Arc<dyn SourceProvider>
-            })
-        } else {
-            None
-        };
+    /// Build a request-scoped service from shared state — a reused HTTP client
+    /// and the process-wide source cache — plus a per-request `config`. This is
+    /// the entrypoint the HTTP transport uses: the server process holds no
+    /// credentials of its own, so it keeps only the shared client + cache and
+    /// constructs a fully-credentialed service per request from the caller's
+    /// header keys. OAuth is rejected here (single on-disk identity is
+    /// incompatible with per-request multi-tenancy); a missing required key
+    /// fails at construction (fail-closed) rather than reusing any server key.
+    pub fn for_request(
+        http_client: reqwest::Client,
+        cache: Arc<Mutex<SourceCache>>,
+        config: Config,
+    ) -> Result<Self> {
+        if config.grok_auth_mode == AuthMode::OAuth {
+            return Err(GrokSearchError::OAuth(
+                "oauth is not supported on the HTTP transport; pass a per-request API key"
+                    .to_string(),
+            ));
+        }
+        let providers = build_providers(&config, &http_client)?;
+        Ok(Self::from_parts(config, http_client, cache, providers))
+    }
 
-        let fallback_sources = if config.firecrawl_enabled {
-            config.firecrawl_api_key.clone().map(|key| {
-                Arc::new(FirecrawlProvider::with_client(
-                    http.clone(),
-                    config.firecrawl_api_url.clone(),
-                    key,
-                )) as Arc<dyn SourceProvider>
-            })
-        } else {
-            None
-        };
-
-        let source_router = Arc::new(crate::sources::SourceRouter::from_config(&config));
-        Ok(Self {
-            cache: Arc::new(Mutex::new(SourceCache::new(config.cache_size))),
-            default_model: resolve_default_model(&config),
+    /// Assemble a `SearchService` from an already-built provider set plus the
+    /// shared `http` client and `cache`. Single assembly point for both `new`
+    /// (fresh client + cache) and `with_config` (shared client + cache).
+    fn from_parts(
+        config: Config,
+        http: reqwest::Client,
+        cache: Arc<Mutex<SourceCache>>,
+        providers: ProviderSet,
+    ) -> Self {
+        Self {
+            cache,
+            default_model: providers.default_model,
             config,
-            ai,
-            sources,
-            fallback_sources,
-            http_client: http.clone(),
-            source_router,
-        })
+            ai: providers.ai,
+            sources: providers.sources,
+            fallback_sources: providers.fallback_sources,
+            http_client: http,
+            source_router: providers.source_router,
+        }
+    }
+
+    /// Namespace a session id with the caller's tenant tag so cached
+    /// `get_sources` pages are isolated per tenant. The plain `session_id`
+    /// returned to the caller is unchanged; only the internal cache key is
+    /// prefixed.
+    fn tenant_cache_key(&self, session_id: &str) -> String {
+        format!("{}:{}", tenant_tag(&self.config), session_id)
     }
 
     pub fn fake_with_sources() -> Self {
@@ -419,10 +528,8 @@ impl SearchService {
 
         let merged_arc = Arc::new(merged);
         let sources_count = merged_arc.len();
-        self.cache
-            .lock()
-            .await
-            .set(session_id.clone(), merged_arc.clone());
+        let cache_key = self.tenant_cache_key(&session_id);
+        self.cache.lock().await.set(cache_key, merged_arc.clone());
 
         // The cache keeps the full enriched content; only the returned copy is
         // trimmed to the response budget so drill-down loses nothing.
@@ -521,10 +628,8 @@ impl SearchService {
 
         let fallback_arc = Arc::new(fallback);
         let sources_count = fallback_arc.len();
-        self.cache
-            .lock()
-            .await
-            .set(session_id.clone(), fallback_arc.clone());
+        let cache_key = self.tenant_cache_key(&session_id);
+        self.cache.lock().await.set(cache_key, fallback_arc.clone());
 
         let content = if response.content.trim().is_empty() {
             format!(
@@ -571,7 +676,7 @@ impl SearchService {
             .cache
             .lock()
             .await
-            .get(session_id)
+            .get(&self.tenant_cache_key(session_id))
             .ok_or_else(|| GrokSearchError::NotFound(format!("session_id={session_id}")))?;
         let total_sources = cached.len();
         let start = offset.min(total_sources);
@@ -1849,5 +1954,90 @@ mod enrich_tests {
                 "get_sources must reuse the cached enriched content"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod request_scope_tests {
+    use super::*;
+
+    /// A long-lived template service, as the HTTP transport would hold one.
+    fn template() -> SearchService {
+        SearchService::new(Config::from_env_map([(
+            "GROK_SEARCH_API_KEY",
+            "xai-template",
+        )]))
+        .expect("template service builds")
+    }
+
+    #[test]
+    fn with_config_rejects_oauth() {
+        let svc = template();
+        let cfg = Config::from_env_map([("GROK_SEARCH_AUTH_MODE", "oauth")]);
+        assert!(
+            svc.with_config(cfg).is_err(),
+            "OAuth must be rejected on the per-request (HTTP) path"
+        );
+    }
+
+    #[test]
+    fn with_config_fails_closed_without_grok_key() {
+        let svc = template();
+        // No grok key and no OpenAI-compatible gateway -> Responses transport ->
+        // construction fails rather than silently reusing the template's key.
+        let cfg = Config::from_env_map(Vec::<(String, String)>::new());
+        assert!(
+            svc.with_config(cfg).is_err(),
+            "missing required key must fail closed, never fall back to the server key"
+        );
+    }
+
+    #[test]
+    fn with_config_accepts_per_request_key() {
+        let svc = template();
+        let cfg = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "xai-caller"),
+            ("TAVILY_API_KEY", "tvly-caller"),
+        ]);
+        assert!(
+            svc.with_config(cfg).is_ok(),
+            "a caller-supplied key must build a request-scoped service"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_shared_within_tenant_isolated_across_tenants() {
+        let svc = template(); // key "xai-template"
+        let session = "abcdef012345";
+
+        // Same-key request-scoped service shares cached sessions, so
+        // get_sources continuation survives across requests.
+        let same = svc
+            .with_config(Config::from_env_map([(
+                "GROK_SEARCH_API_KEY",
+                "xai-template",
+            )]))
+            .expect("same-tenant scoped service");
+        // Seed under the tenant-namespaced key, as web_search would.
+        same.cache
+            .lock()
+            .await
+            .set(same.tenant_cache_key(session), Arc::new(Vec::<Source>::new()));
+        assert!(
+            same.get_sources(session, 0, None).await.is_ok(),
+            "same tenant must read its own cached session"
+        );
+
+        // A different caller key must NOT read that session.
+        let other = svc
+            .with_config(Config::from_env_map([(
+                "GROK_SEARCH_API_KEY",
+                "xai-other",
+            )]))
+            .expect("other-tenant scoped service");
+        assert!(
+            other.get_sources(session, 0, None).await.is_err(),
+            "a different tenant must not read another tenant's cached session"
+        );
     }
 }

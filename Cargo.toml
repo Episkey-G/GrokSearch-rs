@@ -35,6 +35,14 @@ ring = "0.17"
 url = "2"
 percent-encoding = "2"
 quick-xml = { version = "0.37", default-features = false, features = ["encoding"] }
+axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1", "json"] }
+
+[features]
+# Native Streamable HTTP transport (remote, multi-tenant, bring-your-own-key).
+# OFF by default: the default build stays a pure stdio binary — no axum, no
+# multi-threaded runtime — so local stdio users are entirely unaffected. The
+# server build opts in with `--features http`.
+http = ["dep:axum", "tokio/net", "tokio/rt-multi-thread"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -44,3 +52,11 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Server / HTTP build: same size optimizations as `release`, but panic=unwind so
+# a single request handler panic cannot abort the whole multi-tenant process
+# (the panicking task's connection is dropped; the server keeps serving). Build
+# the deployable server binary with `--profile release-http --features http`.
+[profile.release-http]
+inherits = "release"
+panic = "unwind"

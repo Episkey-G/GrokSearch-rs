@@ -4,17 +4,18 @@
 
 **A lightweight Rust MCP server for Grok / OpenAI‑compatible web search, plus Tavily fetch/map and Firecrawl fallback.**
 
-`grok-search-rs` is an **MCP stdio server** — your client (Claude Code, Codex, Cursor, VS Code, …) launches it; you do not run it directly. It exposes one set of tools (`web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`) and supports two upstream transports so you can plug into either xAI's official API or any OpenAI‑compatible relay.
+`grok-search-rs` is an **MCP server** — run it locally over **stdio** (your client launches it; you do not run it directly) or as a **remote Streamable HTTP** service for mobile / multi‑device access (see [self-hosting](#self-hosting-remote-http)). It exposes one set of tools (`web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`) and supports two upstream transports so you can plug into either xAI's official API or any OpenAI‑compatible relay.
 
 ---
 
 ## Features
 
 - 🔎 **Live web search** with cited sources, cached for follow‑up `get_sources` calls. Opt‑in `include_content` enriches the top sources with full extracted text in one call.
-- 📏 **Response budgeting** — `web_search` keeps responses inside agent context limits: only the top `max_inline_sources` carry inline text, a whole‑response char budget (`response_max_chars`, default 60k) trims tail sources with recovery notes, `response_format: "concise" | "detailed"` picks the payload size, and `get_sources` pages through cached sources with `offset`/`limit`. The session cache always keeps full content.
+- 📏 **Response budgeting** — `web_search` keeps responses inside agent context limits: only the top `max_inline_sources` carry inline text, a whole‑response char budget (`response_max_chars`, default 45k — sized to stay under the MCP client token ceiling after JSON serialization) trims tail sources with recovery notes, `response_format: "concise" | "detailed"` picks the payload size, and `get_sources` pages through cached sources with `offset`/`limit`. The session cache always keeps full content.
 - 🧩 **Structured `web_fetch`** — GitHub issues/PRs, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic Tavily → Firecrawl chain. Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
 - 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
 - 🔐 **Optional Grok OAuth mode** — `login/status/logout` commands store a local xAI OAuth token for Responses auth, so the MCP server can run without `GROK_SEARCH_API_KEY`.
+- 🌐 **Optional remote mode** — build with `--features http` to serve the same tools over **Streamable HTTP** (multi‑tenant, bring‑your‑own‑key via request headers) for mobile / multi‑device access. See [self-hosting](#self-hosting-remote-http).
 - 📥 **Tavily fetch / map** for full‑text extraction and link discovery, with **Firecrawl** as automatic fallback. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
 - 🐦 **Optional X/Twitter search** via `x_search` (Responses transport only).
 - 🩺 **`doctor`** — connectivity probe + redacted config in one tool call.
@@ -33,6 +34,21 @@ The npm package ships a native Rust binary; the `grok-search-rs` command is what
 ---
 
 ## Quick Start
+
+**Option A — use the hosted instance (no install).** Point any MCP client that supports remote
+HTTP + custom headers at the public endpoint and pass your own keys as headers:
+
+```bash
+claude mcp add --transport http grok-search https://mcp.episkeyai.com/groksearch_rs/mcp \
+  --header "X-Grok-Api-Key: xai-..." \
+  --header "X-Tavily-Api-Key: tvly-..."
+```
+
+The default gateway is xAI official (`api.x.ai`) — use an xAI key. For another gateway (e.g.
+Modelverse) add `--header "X-Grok-Base-Url: https://api.modelverse.cn/v1"`. No keys are stored
+server-side; best-effort availability. Prefer your own server? See [self-hosting](#self-hosting-remote-http).
+
+**Option B — install locally (stdio).**
 
 1. After `npm install -g grok-search-rs`, add this MCP server entry to your client config:
 
@@ -158,7 +174,7 @@ Notes:
 | `GROK_SEARCH_TIMEOUT_SECONDS` | `60` | HTTP timeout for all upstreams. |
 | `GROK_SEARCH_FETCH_MAX_CHARS` | unset | Default char cap on `web_fetch`. |
 | `GROK_SEARCH_MAX_INLINE_SOURCES` | `5` | Max `web_search` sources carrying inline content; the rest are metadata‑only. |
-| `GROK_SEARCH_RESPONSE_MAX_CHARS` | `60000` | Whole‑response char budget for `web_search`; over‑budget output is truncated tail‑first with `truncated: true`. |
+| `GROK_SEARCH_RESPONSE_MAX_CHARS` | `45000` | Whole‑response char budget for `web_search`; over‑budget output is truncated tail‑first with `truncated: true`. Sized to keep the serialized result under the MCP client token ceiling (Claude Code default `MAX_MCP_OUTPUT_TOKENS=25000`). |
 
 ### Source extraction (`web_fetch` specialists / `web_search` enrichment)
 
@@ -204,6 +220,56 @@ Tired of duplicating `env` blocks across clients? Run `grok-search-rs --init` on
 | `web_fetch` | Page content as clean Markdown. Specialist extractors for GitHub / StackExchange / arXiv / Wikipedia; generic Tavily → Firecrawl fallback otherwise. Returns `source_type` + `fallback_reason`. |
 | `web_map` | Discover URLs on a domain via Tavily Map. |
 | `doctor` | Live connectivity probe + redacted config. Run first when something looks off. |
+
+---
+
+## Self-hosting (remote HTTP)
+
+Besides the default stdio mode, `grok-search-rs` can run as a **remote, multi‑tenant
+Streamable HTTP MCP server** so mobile / on‑the‑go / multi‑device clients can reach it over
+the network. It is **opt‑in behind the `http` Cargo feature** — the default build is
+unchanged (pure stdio, no HTTP dependencies linked in).
+
+**Bring‑your‑own‑key, zero shared credentials.** The server stores no API keys. Each
+request carries the caller's own keys as headers, so many users can share one endpoint and
+each pays with their own keys:
+
+- `X-Grok-Api-Key`, `X-Tavily-Api-Key`, `X-Firecrawl-Api-Key` (optional `X-GitHub-Token`)
+
+A missing required key returns `401` (fail‑closed); OAuth is rejected on this transport
+(stdio only). The operator fixes the Grok‑compatible gateway via `GROK_SEARCH_URL`
+(default `https://api.x.ai`), and callers may switch to another allowlisted gateway with an
+`X-Grok-Base-Url` header (see `GROK_SEARCH_ALLOWED_GROK_URLS`). The remote transport uses the
+Grok **Responses** API only; the OpenAI-compatible chat-completions transport is stdio-only.
+
+```bash
+cargo build --profile release-http --features http    # release-http => panic=unwind (handler panic won't kill the server)
+GROK_MCP_BIND=127.0.0.1:8080 target/release-http/grok-search-rs --http   # bind loopback; terminate TLS upstream
+```
+
+Put a TLS‑terminating reverse proxy (e.g. Caddy) in front. The repo ships a `Dockerfile`,
+`Dockerfile.deploy` (runtime‑only, for low‑RAM hosts), `docker-compose.yml`, and `Caddyfile`
+for a one‑command deploy with automatic HTTPS. Set `MCP_HOSTNAME` (your domain or a
+`<dashed-ip>.sslip.io` name) via the environment or a git‑ignored `.env` — **not** in the
+repo.
+
+Connect a client the same way as the hosted instance ([Quick Start](#quick-start)), pointing
+`url` at your own host (`https://<your-host>/groksearch_rs/mcp`).
+
+### Rotating a key
+
+Keys are never stored server‑side, so rotation is entirely client‑side:
+
+- **stdio** — update the key in your MCP client's `env` block (or the global `config.toml`)
+  and restart the client.
+- **remote HTTP** — update the header value in your client config. For Claude Code:
+  ```bash
+  claude mcp remove grok-search -s user
+  claude mcp add --transport http grok-search https://<your-host>/groksearch_rs/mcp \
+    --header "X-Grok-Api-Key: <new-key>" --header "X-Tavily-Api-Key: <new-key>"
+  ```
+
+Rotate immediately if a key was ever printed, logged, or shared.
 
 ---
 
