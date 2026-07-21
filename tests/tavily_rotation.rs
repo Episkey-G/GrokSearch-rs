@@ -106,9 +106,21 @@ async fn key_scoped_failure_rotates_to_next_key_and_succeeds() {
         .expect("second key should succeed after 429 on first");
 
     assert_eq!(sources.len(), 1);
+    // The starting key is randomized per ring; the invariant is that the 429
+    // triggers exactly one retry with the OTHER key, whichever came first.
+    let log = auth_log.lock().expect("auth log lock").clone();
     assert_eq!(
-        *auth_log.lock().expect("auth log lock"),
-        vec!["Bearer key-a".to_string(), "Bearer key-b".to_string()],
+        log.len(),
+        2,
+        "expected the 429 to trigger exactly one retry"
+    );
+    assert!(
+        log.iter()
+            .all(|auth| auth == "Bearer key-a" || auth == "Bearer key-b"),
+        "unexpected auth headers: {log:?}"
+    );
+    assert_ne!(
+        log[0], log[1],
         "expected the 429 to trigger a retry with the next key"
     );
 }
@@ -157,9 +169,17 @@ async fn successive_requests_round_robin_across_keys() {
             .expect("mock returns 200");
     }
 
-    assert_eq!(
-        *auth_log.lock().expect("auth log lock"),
-        vec!["Bearer key-a".to_string(), "Bearer key-b".to_string()],
+    // The starting key is randomized per ring; round-robin means the second
+    // request must consume the OTHER key, whichever the ring started on.
+    let log = auth_log.lock().expect("auth log lock").clone();
+    assert_eq!(log.len(), 2);
+    assert!(
+        log.iter()
+            .all(|auth| auth == "Bearer key-a" || auth == "Bearer key-b"),
+        "unexpected auth headers: {log:?}"
+    );
+    assert_ne!(
+        log[0], log[1],
         "two successful requests should consume credits from different keys"
     );
 }
