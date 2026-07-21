@@ -81,11 +81,6 @@ struct AppState {
     allowed_origins: Arc<Option<HashSet<String>>>,
     /// Bounds concurrent in-flight requests (DoS protection on a small box).
     limiter: Arc<Semaphore>,
-    /// Grok-compatible gateways a request may target via `X-Grok-Base-Url`
-    /// (stored normalized). Always contains the operator default; extra ones
-    /// come from GROK_SEARCH_ALLOWED_GROK_URLS. Keeps per-request gateway
-    /// selection from becoming an open SSRF proxy.
-    allowed_grok_urls: Arc<HashSet<String>>,
 }
 
 /// Run the HTTP transport, binding `bind` (loopback in production, behind
@@ -98,7 +93,6 @@ pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> an
     let http_client = crate::providers::http::build_restricted_client(operator_cfg.timeout);
     let cache = Arc::new(Mutex::new(SourceCache::new(operator_cfg.cache_size)));
     let allowed_origins = parse_allowed_origins(&base_env);
-    let allowed_grok_urls = parse_allowed_grok_urls(&base_env, &operator_cfg.grok_api_url);
 
     let state = AppState {
         http_client,
@@ -106,7 +100,6 @@ pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> an
         base_env: Arc::new(strip_secrets(base_env)),
         allowed_origins: Arc::new(allowed_origins),
         limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-        allowed_grok_urls: Arc::new(allowed_grok_urls),
     };
 
     // Only POST is registered; axum answers other methods on /mcp with 405.
@@ -210,14 +203,16 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
     // 4. Derive a per-request config from operator defaults + header keys, then
     //    build a request-scoped, fully-credentialed service. Missing required
     //    key -> 401 (fail-closed); OAuth -> 400. Never falls back to a server key.
-    // Multi-gateway: a client may pick a Grok gateway via X-Grok-Base-Url, but
-    // only from the operator allowlist; otherwise the operator default is used.
-    // This gives remote callers the same "any gateway + matching key" freedom as
-    // the stdio path, without becoming an open proxy.
-    let gateway = match resolve_gateway(&headers, &state.allowed_grok_urls) {
-        Ok(gateway) => gateway,
-        Err(message) => return json_rpc_error(StatusCode::FORBIDDEN, id, -32602, message),
-    };
+    // Multi-gateway: a client may point at any Grok-compatible gateway via
+    // X-Grok-Base-Url (BYO gateway + matching key, same freedom as the stdio
+    // path). The gateway host is SSRF-validated below, so a caller can target
+    // any *public* gateway but never the operator's internal/metadata network.
+    let gateway = resolve_gateway(&headers);
+    if let Some(url) = gateway.as_deref() {
+        if let Err((status, message)) = validate_public_url(url).await {
+            return json_rpc_error(status, id, -32602, message);
+        }
+    }
     let config = request_config(&state.base_env, &headers, gateway.as_deref());
     let service =
         match SearchService::for_request(state.http_client.clone(), state.cache.clone(), config) {
@@ -428,38 +423,15 @@ fn request_config(
     Config::from_env_map(map)
 }
 
-/// Resolve the Grok gateway for a request. A client may request one via
-/// `X-Grok-Base-Url`; it is honored only if its normalized form is on the
-/// operator allowlist, otherwise the request is rejected. Absent header ->
-/// `None` (the operator default gateway is used).
-fn resolve_gateway(
-    headers: &HeaderMap,
-    allowed: &HashSet<String>,
-) -> Result<Option<String>, String> {
-    let requested = header_str(headers, "x-grok-base-url")
+/// The Grok gateway a request targets via `X-Grok-Base-Url`, honored verbatim
+/// (BYO gateway). Absent/empty header -> `None` (the operator default gateway
+/// is used). The returned URL's host is SSRF-validated by the caller before
+/// use, so any *public* gateway is allowed but internal addresses are not.
+fn resolve_gateway(headers: &HeaderMap) -> Option<String> {
+    header_str(headers, "x-grok-base-url")
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let Some(raw) = requested else {
-        return Ok(None);
-    };
-    if allowed.contains(&crate::config::normalize_v1_base(raw)) {
-        Ok(Some(raw.to_string()))
-    } else {
-        Err(format!("grok gateway not allowed: {raw}"))
-    }
-}
-
-/// Build the set of allowed (normalized) Grok gateways: the operator default
-/// plus any comma-separated GROK_SEARCH_ALLOWED_GROK_URLS entries.
-fn parse_allowed_grok_urls(env: &HashMap<String, String>, default_url: &str) -> HashSet<String> {
-    let mut set = HashSet::new();
-    set.insert(default_url.to_string());
-    if let Some(raw) = env.get("GROK_SEARCH_ALLOWED_GROK_URLS") {
-        for entry in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
-            set.insert(crate::config::normalize_v1_base(entry));
-        }
-    }
-    set
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -538,25 +510,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gateway_enforces_allowlist() {
-        let mut allowed = HashSet::new();
-        allowed.insert("https://api.x.ai/v1".to_string());
-        allowed.insert("https://api.modelverse.cn/v1".to_string());
+    fn resolve_gateway_reads_header_verbatim() {
         // No header -> operator default (None).
-        assert_eq!(resolve_gateway(&headers(&[]), &allowed).unwrap(), None);
-        // Allowlisted gateway (normalization-insensitive) -> honored verbatim.
-        let got = resolve_gateway(
-            &headers(&[("X-Grok-Base-Url", "https://api.modelverse.cn")]),
-            &allowed,
-        )
-        .unwrap();
-        assert_eq!(got.as_deref(), Some("https://api.modelverse.cn"));
-        // Not allowlisted -> rejected.
-        assert!(resolve_gateway(
-            &headers(&[("X-Grok-Base-Url", "https://evil.example")]),
-            &allowed
-        )
-        .is_err());
+        assert_eq!(resolve_gateway(&headers(&[])), None);
+        // Any gateway is honored verbatim (allowlist removed); the host is
+        // SSRF-validated separately in the request path.
+        assert_eq!(
+            resolve_gateway(&headers(&[("X-Grok-Base-Url", "https://api.x.ai")])).as_deref(),
+            Some("https://api.x.ai"),
+        );
+        // Empty / whitespace-only header -> None.
+        assert_eq!(
+            resolve_gateway(&headers(&[("X-Grok-Base-Url", "   ")])),
+            None
+        );
     }
 
     #[test]

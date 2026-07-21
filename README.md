@@ -44,8 +44,8 @@ claude mcp add --transport http grok-search https://mcp.episkeyai.com/groksearch
   --header "X-Tavily-Api-Key: tvly-..."
 ```
 
-The default gateway is xAI official (`api.x.ai`) — use an xAI key. For another gateway (e.g.
-Modelverse) add `--header "X-Grok-Base-Url: https://api.modelverse.cn/v1"`. No keys are stored
+The default gateway is xAI official (`api.x.ai`) — use an xAI key. For any other Grok‑compatible
+gateway, add `--header "X-Grok-Base-Url: https://your-gateway.example/v1"` with a matching key. No keys are stored
 server-side; best-effort availability. Prefer your own server? See [self-hosting](#self-hosting-remote-http).
 
 **Option B — install locally (stdio).**
@@ -120,7 +120,7 @@ Pick **one** transport group. Both Tavily and Firecrawl keys are shared across t
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Offer `web_search` tool to Grok. |
 | `GROK_SEARCH_X_SEARCH` | `false` | Offer `x_search` tool (X/Twitter) to Grok. |
 
-Verified upstreams: **xAI** (`https://api.x.ai`, both tools), **Modelverse** (`https://api.modelverse.cn`, `x_search` depends on relay).
+Verified upstream: **xAI** (`https://api.x.ai`, both tools). Other Grok‑compatible gateways work with a matching key; `x_search` availability depends on the gateway.
 
 OAuth mode is a single-binary flow:
 
@@ -237,10 +237,10 @@ each pays with their own keys:
 - `X-Grok-Api-Key`, `X-Tavily-Api-Key`, `X-Firecrawl-Api-Key` (optional `X-GitHub-Token`)
 
 A missing required key returns `401` (fail‑closed); OAuth is rejected on this transport
-(stdio only). The operator fixes the Grok‑compatible gateway via `GROK_SEARCH_URL`
-(default `https://api.x.ai`), and callers may switch to another allowlisted gateway with an
-`X-Grok-Base-Url` header (see `GROK_SEARCH_ALLOWED_GROK_URLS`). The remote transport uses the
-Grok **Responses** API only; the OpenAI-compatible chat-completions transport is stdio-only.
+(stdio only). The operator sets the default Grok‑compatible gateway via `GROK_SEARCH_URL`
+(default `https://api.x.ai`), and callers may point at any other Grok‑compatible gateway with an
+`X-Grok-Base-Url` header (any public gateway is honored; internal/private addresses are rejected).
+The remote transport uses the Grok **Responses** API only; the OpenAI-compatible chat-completions transport is stdio-only.
 
 ```bash
 cargo build --profile release-http --features http    # release-http => panic=unwind (handler panic won't kill the server)

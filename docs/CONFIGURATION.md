@@ -26,12 +26,12 @@ Example:
 
 ```bash
 GROK_SEARCH_API_KEY=...
-GROK_SEARCH_URL=https://api.modelverse.cn
+GROK_SEARCH_URL=https://api.x.ai
 GROK_SEARCH_MODEL=grok-4-1-fast-reasoning
 GROK_SEARCH_X_SEARCH=false
 ```
 
-The example above calls `https://api.modelverse.cn/v1/responses`.
+The example above calls `https://api.x.ai/v1/responses`.
 
 ### OAuth mode
 
