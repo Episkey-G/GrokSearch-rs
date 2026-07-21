@@ -1066,26 +1066,27 @@ fn apply_fetch_limit(
 /// Generic (non-specialist) content fetch via the configured source providers:
 /// primary (Tavily) first, then fallback (Firecrawl). Shared by `web_fetch` and
 /// inline enrichment so both agree on how an ordinary URL is retrieved once no
-/// specialist extractor matches. Returns `MissingConfig` when neither provider
-/// is configured.
+/// specialist extractor matches. Returns `MissingConfig` only when neither
+/// provider is configured; a configured primary that fails or yields empty
+/// content with no fallback surfaces its real error instead, so users are not
+/// sent to debug config that is actually set.
 async fn generic_source_fetch(
     primary: &Option<Arc<dyn SourceProvider>>,
     fallback: &Option<Arc<dyn SourceProvider>>,
     url: &str,
 ) -> Result<String> {
-    if let Some(provider) = primary {
-        if let Ok(content) = provider.fetch(url).await {
-            if !content.trim().is_empty() {
-                return Ok(content);
-            }
-        }
+    let primary_err = match primary {
+        Some(provider) => match provider.fetch(url).await {
+            Ok(content) if !content.trim().is_empty() => return Ok(content),
+            Ok(_) => GrokSearchError::Provider(format!("Tavily returned empty content for {url}")),
+            Err(err) => err,
+        },
+        None => GrokSearchError::MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY"),
+    };
+    match fallback {
+        Some(provider) => provider.fetch(url).await,
+        None => Err(primary_err),
     }
-    if let Some(provider) = fallback {
-        return provider.fetch(url).await;
-    }
-    Err(GrokSearchError::MissingConfig(
-        "TAVILY_API_KEY or FIRECRAWL_API_KEY",
-    ))
 }
 
 /// Concurrently back-fill `Source.content` for the first `max_sources` sources
@@ -1685,6 +1686,27 @@ mod enrich_tests {
         }
     }
 
+    /// Generic `fetch` succeeds but yields whitespace-only content — exercises
+    /// the "primary configured but empty" error path of `generic_source_fetch`.
+    struct EmptyFetchProvider;
+    #[async_trait]
+    impl SourceProvider for EmptyFetchProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, _url: &str) -> Result<String> {
+            Ok("  \n".to_string())
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
     /// Build a SearchService with fake AI + a caller-supplied supplemental
     /// provider, router, and config. Mirrors the doctor_* struct-literal tests.
     fn service_with_sources(
@@ -1892,6 +1914,65 @@ mod enrich_tests {
         assert!(
             !content.starts_with("_Failed to retrieve:"),
             "must not store a failure note when generic fetch succeeds: {content:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_fetch_missing_config_only_when_no_provider_configured() {
+        let err = generic_source_fetch(&None, &None, "https://example.com")
+            .await
+            .expect_err("no providers must error");
+        assert!(
+            matches!(
+                err,
+                GrokSearchError::MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY")
+            ),
+            "expected MissingConfig, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_fetch_primary_error_surfaces_without_fallback() {
+        // Regression: a configured primary whose fetch failed used to fall
+        // through to MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY") even
+        // though TAVILY_API_KEY was set, sending users to debug config instead
+        // of the actual provider failure.
+        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(SearchOkFetchErrProvider));
+        let err = generic_source_fetch(&primary, &None, "https://example.com")
+            .await
+            .expect_err("primary failure must error");
+        match err {
+            GrokSearchError::Provider(msg) => assert_eq!(msg, "generic fetch unavailable"),
+            other => panic!("primary error must pass through unchanged, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_fetch_primary_empty_content_reports_empty_without_fallback() {
+        let url = "https://npmjs.com/package/grok-search-rs";
+        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(EmptyFetchProvider));
+        let err = generic_source_fetch(&primary, &None, url)
+            .await
+            .expect_err("empty content must error");
+        match err {
+            GrokSearchError::Provider(msg) => assert!(
+                msg.contains("empty content") && msg.contains(url),
+                "message must name the empty result and url, got: {msg}"
+            ),
+            other => panic!("expected Provider empty-content error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_fetch_primary_failure_still_rescued_by_fallback() {
+        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(SearchOkFetchErrProvider));
+        let fallback: Option<Arc<dyn SourceProvider>> = Some(Arc::new(FakeSourceProvider));
+        let content = generic_source_fetch(&primary, &fallback, "https://example.com")
+            .await
+            .expect("fallback must rescue primary failure");
+        assert!(
+            content.starts_with("Fetched content from"),
+            "fallback content expected, got: {content:?}"
         );
     }
 
