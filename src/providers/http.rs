@@ -117,8 +117,14 @@ pub fn build_restricted_client_pinned(
     host: &str,
     addrs: &[std::net::SocketAddr],
 ) -> Client {
+    use reqwest::redirect::Policy;
     restricted_client_builder(timeout)
         .resolve_to_addrs(host, addrs)
+        // The pin only covers the ORIGINAL host; a 3xx to another host would be
+        // re-resolved unpinned (redirect-level DNS-rebinding SSRF). A Grok
+        // gateway's /v1/responses endpoint never legitimately redirects, so
+        // refuse to follow redirects at all on the pinned client.
+        .redirect(Policy::none())
         .build()
         .unwrap_or_else(|_| Client::new())
 }

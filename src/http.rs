@@ -38,6 +38,10 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Max concurrent in-flight requests; excess gets 429 to protect the 1 GB box.
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 
+/// Max concurrent caller-gateway DNS resolutions; excess gets 503. Bounds how
+/// many (potentially hung) blocking getaddrinfo calls can run at once.
+const MAX_GATEWAY_DNS_LOOKUPS: usize = 8;
+
 /// Protocol revisions the Streamable HTTP transport implements. Excludes
 /// 2024-11-05 (the deprecated HTTP+SSE transport this endpoint does not serve)
 /// and 2025-03-26 (which still mandates JSON-RPC batching — removed only in
@@ -81,6 +85,9 @@ struct AppState {
     allowed_origins: Arc<Option<HashSet<String>>>,
     /// Bounds concurrent in-flight requests (DoS protection on a small box).
     limiter: Arc<Semaphore>,
+    /// Caps concurrent caller-gateway host resolutions so hung blocking
+    /// getaddrinfo calls (which outlive their timeout) can't pile up threads.
+    gateway_dns_limiter: Arc<Semaphore>,
     /// Operator request timeout, reused to build a per-request DNS-pinned client
     /// for a caller-supplied gateway (`X-Grok-Base-Url`).
     timeout: std::time::Duration,
@@ -103,6 +110,7 @@ pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> an
         base_env: Arc::new(strip_secrets(base_env)),
         allowed_origins: Arc::new(allowed_origins),
         limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+        gateway_dns_limiter: Arc::new(Semaphore::new(MAX_GATEWAY_DNS_LOOKUPS)),
         timeout: operator_cfg.timeout,
     };
 
@@ -230,7 +238,32 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
     // internal / metadata address between the check and the request
     // (DNS-rebinding SSRF).
     let service = if let Some(url) = gateway.as_deref() {
-        let addrs = match validate_public_url(url).await {
+        // Caller gateways must be HTTPS: the request carries the caller's bearer
+        // key, so a plaintext http:// gateway (typo/downgrade) would leak it on
+        // the wire. (URL-fetch tools still allow http; this is the gateway only.)
+        if !gateway_is_https(url) {
+            return json_rpc_error(
+                StatusCode::BAD_REQUEST,
+                id.clone(),
+                -32602,
+                "X-Grok-Base-Url must use https".to_string(),
+            );
+        }
+        // Cap concurrent gateway-host resolutions: a blocking getaddrinfo can
+        // outlive its 5s timeout, so bound how many run at once (the permit is
+        // held until the lookup returns) — a hung host can't pile up threads.
+        let dns_permit = match state.gateway_dns_limiter.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return json_rpc_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    id.clone(),
+                    -32603,
+                    "gateway resolver busy".to_string(),
+                )
+            }
+        };
+        let addrs = match validate_public_url(url, Some(dns_permit)).await {
             Ok(addrs) => addrs,
             Err((status, message)) => return json_rpc_error(status, id.clone(), -32602, message),
         };
@@ -253,7 +286,7 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
     //    targets before any server-side request is made. HTTP path only, so
     //    local stdio users keep full fetch capability (e.g. localhost).
     if let Some(url) = fetch_tool_url(&request) {
-        if let Err((status, message)) = validate_public_url(url).await {
+        if let Err((status, message)) = validate_public_url(url, None).await {
             return json_rpc_error(status, id, -32602, message);
         }
     }
@@ -312,7 +345,10 @@ fn fetch_tool_url(request: &Value) -> Option<&str> {
 /// link-local (incl. cloud metadata), or CGNAT address. On success returns the
 /// validated public IP(s) the host resolves to, so the caller can pin the
 /// actual connection to them (closing DNS-rebinding between check and use).
-async fn validate_public_url(raw: &str) -> Result<Vec<std::net::IpAddr>, (StatusCode, String)> {
+async fn validate_public_url(
+    raw: &str,
+    dns_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Vec<std::net::IpAddr>, (StatusCode, String)> {
     let parsed = url::Url::parse(raw)
         .map_err(|err| (StatusCode::BAD_REQUEST, format!("invalid url: {err}")))?;
     match parsed.scheme() {
@@ -348,6 +384,10 @@ async fn validate_public_url(raw: &str) -> Result<Vec<std::net::IpAddr>, (Status
     let resolved = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::task::spawn_blocking(move || {
+            // Hold the resolver permit until getaddrinfo actually returns: the
+            // 5s timeout abandons this task but cannot cancel it, so the permit
+            // (not the timeout) is what bounds concurrent hung lookups.
+            let _dns_permit = dns_permit;
             use std::net::ToSocketAddrs;
             (host_owned.as_str(), port)
                 .to_socket_addrs()
@@ -533,6 +573,15 @@ fn parse_allowed_origins(env: &HashMap<String, String>) -> Option<HashSet<String
     }
 }
 
+/// A caller-supplied gateway must be HTTPS: the request carries the caller's
+/// bearer key, so a plaintext `http://` gateway would leak it on the wire.
+/// (URL-fetch tools still allow `http`; this restriction is gateway-only.)
+fn gateway_is_https(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|parsed| parsed.scheme() == "https")
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,7 +700,7 @@ mod tests {
             "gopher://example.com/",                     // bad scheme
         ] {
             assert!(
-                validate_public_url(bad).await.is_err(),
+                validate_public_url(bad, None).await.is_err(),
                 "expected {bad} to be rejected"
             );
         }
@@ -661,10 +710,18 @@ mod tests {
     async fn validate_public_url_allows_public_ip_literal() {
         // Public IP literals pass with no DNS lookup, returning the pinned IP.
         assert_eq!(
-            validate_public_url("https://1.1.1.1/").await.unwrap(),
+            validate_public_url("https://1.1.1.1/", None).await.unwrap(),
             vec!["1.1.1.1".parse::<std::net::IpAddr>().unwrap()]
         );
-        assert!(validate_public_url("http://8.8.8.8/").await.is_ok());
+        assert!(validate_public_url("http://8.8.8.8/", None).await.is_ok());
+    }
+
+    #[test]
+    fn gateway_is_https_rejects_plaintext() {
+        assert!(gateway_is_https("https://api.x.ai/v1"));
+        assert!(!gateway_is_https("http://api.x.ai/v1"));
+        assert!(!gateway_is_https("ftp://api.x.ai"));
+        assert!(!gateway_is_https("not a url"));
     }
 
     #[test]
