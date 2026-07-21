@@ -57,11 +57,11 @@ pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// Like [`build_client`] but rejects redirects to private/loopback IP-literal
-/// targets (defense-in-depth against redirect-based SSRF) and caps redirect
-/// depth. Used only by the public HTTP transport.
+/// Shared builder for the restricted (SSRF-aware) HTTP-transport client: the
+/// tuning knobs plus a redirect policy that rejects redirects to non-public
+/// targets. Callers finish with `.build()`, optionally after pinning DNS.
 #[cfg(feature = "http")]
-pub fn build_restricted_client(timeout: Duration) -> Client {
+fn restricted_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
     use reqwest::redirect::Policy;
     Client::builder()
         .timeout(timeout)
@@ -95,6 +95,30 @@ pub fn build_restricted_client(timeout: Duration) -> Client {
             }
             attempt.follow()
         }))
+}
+
+/// Like [`build_client`] but rejects redirects to private/loopback IP-literal
+/// targets (defense-in-depth against redirect-based SSRF) and caps redirect
+/// depth. Used only by the public HTTP transport.
+#[cfg(feature = "http")]
+pub fn build_restricted_client(timeout: Duration) -> Client {
+    restricted_client_builder(timeout)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+/// Like [`build_restricted_client`] but pins DNS for `host` to `addrs` (already
+/// validated as public) so the connection cannot re-resolve the hostname to an
+/// internal address between the SSRF check and the request (DNS-rebinding).
+/// Used for caller-supplied Grok gateways (`X-Grok-Base-Url`) on the HTTP path.
+#[cfg(feature = "http")]
+pub fn build_restricted_client_pinned(
+    timeout: Duration,
+    host: &str,
+    addrs: &[std::net::SocketAddr],
+) -> Client {
+    restricted_client_builder(timeout)
+        .resolve_to_addrs(host, addrs)
         .build()
         .unwrap_or_else(|_| Client::new())
 }
