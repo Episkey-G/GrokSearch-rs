@@ -4,6 +4,11 @@ All notable changes to GrokSearch-rs are documented here.
 
 ## Unreleased
 
+### Added
+
+- **`X-Grok-Model` 请求头(远程 HTTP)。** 调用方可按请求指定 Grok 模型名,与
+  `X-Grok-Base-Url` 配套(模型 id 因网关而异);缺省沿用运营方默认模型。
+
 ## 0.1.19 - 2026-07-21
 
 ### Changed

@@ -45,7 +45,8 @@ claude mcp add --transport http grok-search https://mcp.episkeyai.com/groksearch
 ```
 
 The default gateway is xAI official (`api.x.ai`) — use an xAI key. For any other Grok‑compatible
-gateway, add `--header "X-Grok-Base-Url: https://your-gateway.example/v1"` with a matching key. No keys are stored
+gateway, add `--header "X-Grok-Base-Url: https://your-gateway.example/v1"` with a matching key, and
+optionally `--header "X-Grok-Model: <model>"` (model ids are gateway‑specific). No keys are stored
 server-side; best-effort availability. Prefer your own server? See [self-hosting](#self-hosting-remote-http).
 
 **Option B — install locally (stdio).**
@@ -235,6 +236,7 @@ request carries the caller's own keys as headers, so many users can share one en
 each pays with their own keys:
 
 - `X-Grok-Api-Key`, `X-Tavily-Api-Key`, `X-Firecrawl-Api-Key` (optional `X-GitHub-Token`)
+- Optional non‑secret overrides: `X-Grok-Base-Url` (gateway), `X-Grok-Model` (model name, since model ids are gateway‑specific)
 
 A missing required key returns `401` (fail‑closed); OAuth is rejected on this transport
 (stdio only). The operator sets the default Grok‑compatible gateway via `GROK_SEARCH_URL`

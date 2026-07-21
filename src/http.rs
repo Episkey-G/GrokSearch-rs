@@ -72,6 +72,10 @@ const HEADER_TO_ENV: &[(&str, &str)] = &[
     ("x-tavily-api-key", "TAVILY_API_KEY"),
     ("x-firecrawl-api-key", "FIRECRAWL_API_KEY"),
     ("x-github-token", "GITHUB_TOKEN"),
+    // Non-secret: lets a caller pick the Grok model per request (pairs with
+    // X-Grok-Base-Url, since model names are gateway-specific). Absent header
+    // -> the operator default model.
+    ("x-grok-model", "GROK_SEARCH_MODEL"),
 ];
 
 #[derive(Clone)]
@@ -632,11 +636,16 @@ mod tests {
             &headers(&[
                 ("X-Grok-Api-Key", "xai-caller"),
                 ("X-Tavily-Api-Key", "tvly-caller"),
+                ("X-Grok-Model", "grok-caller-model"),
             ]),
             None,
         );
         assert_eq!(cfg.grok_api_key.as_deref(), Some("xai-caller"));
         assert_eq!(cfg.tavily_api_key.as_deref(), Some("tvly-caller"));
+        assert_eq!(cfg.grok_model, "grok-caller-model");
+        // Absent model header -> operator default survives.
+        let default_cfg = request_config(&base(), &headers(&[]), None);
+        assert_eq!(default_cfg.grok_model, "grok-4-1-fast-reasoning");
     }
 
     #[test]
