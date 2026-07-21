@@ -129,6 +129,20 @@ struct ProviderSet {
 /// `SearchService::new` body so both the process-wide (stdio) and per-request
 /// (HTTP) construction paths share one implementation.
 fn build_providers(config: &Config, http: &reqwest::Client) -> Result<ProviderSet> {
+    build_providers_with_grok(config, http, http)
+}
+
+/// Like [`build_providers`], but the Grok **Responses** provider uses
+/// `grok_http` while every other provider (Tavily / Firecrawl / source
+/// fetching) keeps `http`. The HTTP transport passes a DNS-pinned,
+/// no-redirect client as `grok_http` for a caller-supplied gateway
+/// (`X-Grok-Base-Url`) — that restriction must apply to the gateway request
+/// only, not to unrelated fetch/search traffic.
+fn build_providers_with_grok(
+    config: &Config,
+    http: &reqwest::Client,
+    grok_http: &reqwest::Client,
+) -> Result<ProviderSet> {
     use crate::config::Transport;
 
     let ai: Arc<dyn AiProvider> = match config.transport {
@@ -156,7 +170,7 @@ fn build_providers(config: &Config, http: &reqwest::Client) -> Result<ProviderSe
                     }
                 };
             Arc::new(GrokResponsesProvider::with_credential_client(
-                http.clone(),
+                grok_http.clone(),
                 config.grok_api_url.clone(),
                 credential,
                 config.web_search_enabled,
@@ -232,16 +246,20 @@ fn build_providers(config: &Config, http: &reqwest::Client) -> Result<ProviderSe
 /// key. Cache entries are stored under `tag:session_id` so one tenant can never
 /// read another tenant's cached `get_sources` pages on the shared HTTP process.
 /// For stdio (a single process key) the tag is constant, so behavior is
-/// unchanged. Uses a SHA-256 prefix — never any fragment of the raw key.
+/// unchanged. The gateway URL is part of the hash material: with arbitrary
+/// public gateways two tenants on different gateways may present the same
+/// opaque key string, and they must not share a cache namespace. Uses a
+/// SHA-256 prefix — never any fragment of the raw key.
 fn tenant_tag(config: &Config) -> String {
-    let material = config
+    let key = config
         .grok_api_key
         .as_deref()
         .or(config.openai_compatible_api_key.as_deref())
         .unwrap_or("");
-    if material.is_empty() {
+    if key.is_empty() {
         return "anon".to_string();
     }
+    let material = format!("{}\n{}", config.grok_api_url, key);
     let digest = ring::digest::digest(&ring::digest::SHA256, material.as_bytes());
     digest.as_ref()[..8]
         .iter()
@@ -285,13 +303,29 @@ impl SearchService {
         cache: Arc<Mutex<SourceCache>>,
         config: Config,
     ) -> Result<Self> {
+        Self::for_request_with_grok_client(http_client.clone(), http_client, cache, config)
+    }
+
+    /// Like [`for_request`], but the Grok provider uses `grok_client` while all
+    /// other providers keep `http_client`. The HTTP transport passes a
+    /// DNS-pinned, no-redirect client here for a caller-supplied gateway, so
+    /// the pin/no-redirect restriction stays scoped to the gateway request and
+    /// never degrades unrelated fetch/search redirect handling.
+    ///
+    /// [`for_request`]: SearchService::for_request
+    pub fn for_request_with_grok_client(
+        http_client: reqwest::Client,
+        grok_client: reqwest::Client,
+        cache: Arc<Mutex<SourceCache>>,
+        config: Config,
+    ) -> Result<Self> {
         if config.grok_auth_mode == AuthMode::OAuth {
             return Err(GrokSearchError::OAuth(
                 "oauth is not supported on the HTTP transport; pass a per-request API key"
                     .to_string(),
             ));
         }
-        let providers = build_providers(&config, &http_client)?;
+        let providers = build_providers_with_grok(&config, &http_client, &grok_client)?;
         Ok(Self::from_parts(config, http_client, cache, providers))
     }
 
@@ -2039,5 +2073,31 @@ mod request_scope_tests {
             other.get_sources(session, 0, None).await.is_err(),
             "a different tenant must not read another tenant's cached session"
         );
+    }
+
+    #[test]
+    fn tenant_tag_namespaces_by_gateway() {
+        // Same opaque key on two different gateways must NOT share a cache
+        // namespace: with arbitrary public gateways, independent gateways can
+        // issue/accept identical key strings for different callers.
+        let on_xai = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "same-key"),
+            ("GROK_SEARCH_URL", "https://api.x.ai"),
+        ]);
+        let on_other = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "same-key"),
+            ("GROK_SEARCH_URL", "https://gateway.example"),
+        ]);
+        assert_ne!(
+            tenant_tag(&on_xai),
+            tenant_tag(&on_other),
+            "gateway must be part of the tenant namespace"
+        );
+        // Same key + same gateway stays stable (continuation still works).
+        let again = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "same-key"),
+            ("GROK_SEARCH_URL", "https://api.x.ai"),
+        ]);
+        assert_eq!(tenant_tag(&on_xai), tenant_tag(&again));
     }
 }

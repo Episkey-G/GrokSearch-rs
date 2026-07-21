@@ -38,9 +38,10 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Max concurrent in-flight requests; excess gets 429 to protect the 1 GB box.
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 
-/// Max concurrent caller-gateway DNS resolutions; excess gets 503. Bounds how
-/// many (potentially hung) blocking getaddrinfo calls can run at once.
-const MAX_GATEWAY_DNS_LOOKUPS: usize = 8;
+/// Max concurrent host resolutions (caller-gateway + fetch-tool SSRF
+/// validation); excess gets 503. Bounds how many (potentially hung) blocking
+/// getaddrinfo calls can run at once.
+const MAX_DNS_LOOKUPS: usize = 8;
 
 /// Protocol revisions the Streamable HTTP transport implements. Excludes
 /// 2024-11-05 (the deprecated HTTP+SSE transport this endpoint does not serve)
@@ -85,9 +86,10 @@ struct AppState {
     allowed_origins: Arc<Option<HashSet<String>>>,
     /// Bounds concurrent in-flight requests (DoS protection on a small box).
     limiter: Arc<Semaphore>,
-    /// Caps concurrent caller-gateway host resolutions so hung blocking
-    /// getaddrinfo calls (which outlive their timeout) can't pile up threads.
-    gateway_dns_limiter: Arc<Semaphore>,
+    /// Caps concurrent host resolutions (gateway + fetch-tool validation) so
+    /// hung blocking getaddrinfo calls (which outlive their timeout) can't
+    /// pile up threads.
+    dns_limiter: Arc<Semaphore>,
     /// Operator request timeout, reused to build a per-request DNS-pinned client
     /// for a caller-supplied gateway (`X-Grok-Base-Url`).
     timeout: std::time::Duration,
@@ -110,7 +112,7 @@ pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> an
         base_env: Arc::new(strip_secrets(base_env)),
         allowed_origins: Arc::new(allowed_origins),
         limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-        gateway_dns_limiter: Arc::new(Semaphore::new(MAX_GATEWAY_DNS_LOOKUPS)),
+        dns_limiter: Arc::new(Semaphore::new(MAX_DNS_LOOKUPS)),
         timeout: operator_cfg.timeout,
     };
 
@@ -252,7 +254,7 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
         // Cap concurrent gateway-host resolutions: a blocking getaddrinfo can
         // outlive its 5s timeout, so bound how many run at once (the permit is
         // held until the lookup returns) — a hung host can't pile up threads.
-        let dns_permit = match state.gateway_dns_limiter.clone().try_acquire_owned() {
+        let dns_permit = match state.dns_limiter.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 return json_rpc_error(
@@ -271,7 +273,15 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
             Ok(client) => client,
             Err((status, message)) => return json_rpc_error(status, id.clone(), -32602, message),
         };
-        match SearchService::for_request(client, state.cache.clone(), config) {
+        // The pinned, no-redirect client applies to the GROK provider only;
+        // Tavily/Firecrawl/source fetching keep the shared restricted client
+        // (which follows redirects, re-validating every hop).
+        match SearchService::for_request_with_grok_client(
+            state.http_client.clone(),
+            client,
+            state.cache.clone(),
+            config,
+        ) {
             Ok(service) => service,
             Err(err) => return for_request_error(id.clone(), err),
         }
@@ -284,9 +294,23 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
 
     // 6. SSRF guard: for URL-fetching tools, block non-public / bad-scheme
     //    targets before any server-side request is made. HTTP path only, so
-    //    local stdio users keep full fetch capability (e.g. localhost).
+    //    local stdio users keep full fetch capability (e.g. localhost). The
+    //    hostname lookup takes a DNS permit too: a timed-out getaddrinfo keeps
+    //    its blocking thread alive, so the same semaphore that bounds gateway
+    //    lookups must bound fetch-validation lookups.
     if let Some(url) = fetch_tool_url(&request) {
-        if let Err((status, message)) = validate_public_url(url, None).await {
+        let dns_permit = match state.dns_limiter.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return json_rpc_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    id,
+                    -32603,
+                    "resolver busy".to_string(),
+                )
+            }
+        };
+        if let Err((status, message)) = validate_public_url(url, Some(dns_permit)).await {
             return json_rpc_error(status, id, -32602, message);
         }
     }
