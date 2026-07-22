@@ -39,7 +39,9 @@ for platform in "${PLATFORMS[@]}"; do
   rustup target add "$target"
   cargo zigbuild --profile release-http --features http --target "$target" --locked
   mkdir -p "dist/$platform"
-  cp "target/$target/release-http/grok-search-rs" "dist/$platform/grok-search-rs"
+  # install(1), not cp: pin mode 0755 regardless of umask — docker COPY keeps
+  # the staged mode and the image runs as non-root, so 0700 here bricks it.
+  install -m 0755 "target/$target/release-http/grok-search-rs" "dist/$platform/grok-search-rs"
 done
 
 echo "==> dist/ ready:"
