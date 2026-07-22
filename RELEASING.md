@@ -41,10 +41,16 @@ Both predate the tag-triggered auto-sync and remain for offline use.
 
 - `secrets.NPM_TOKEN` configured
 - No branch protection rule on `main` blocking `github-actions[bot]`
+- **One-time, after the first tagged release that pushes the image**: set
+  `ghcr.io/episkey-g/grok-search-rs` to **public** in the package settings
+  (profile → Packages → grok-search-rs → Package settings → Change visibility).
+  GHCR creates new packages private by default and offers no API to change
+  visibility from CI, so until this flip anonymous `docker pull` returns 401
+  even though the workflow succeeded. Later pushes keep the public setting.
 
 ## Verify after release
 
 - GitHub release page lists 7 archives (5 stdio + 2 `-http` Linux) + `SHA256SUMS`
 - `npx grok-search-rs@X.Y.Z --help` works
-- `docker pull ghcr.io/episkey-g/grok-search-rs:X.Y.Z` resolves on both amd64 and arm64
+- `docker pull ghcr.io/episkey-g/grok-search-rs:X.Y.Z` resolves on both amd64 and arm64 **without logging in** (a 401 means the package is still private — see Prerequisites)
 - `main` has a `chore: sync manifests to X.Y.Z` commit from `github-actions[bot]`
