@@ -15,6 +15,9 @@ All notable changes to GrokSearch-rs are documented here.
   enrichment 抓取与响应预算。现在 `normalize_tavily_results` 丢弃 score <
   0.1 的搜索结果:全部被过滤时 speculative 预取自然落到 Firecrawl 兜底,
   无 score 的条目(map 端点、API 演进)照旧保留,`web_map` 行为不变。
+  同时收紧兜底语义(Codex 评审):Firecrawl 完全无视
+  include/exclude_domains 与 recency_days,带这些约束的请求不再落入
+  Firecrawl——约束请求 Tavily-or-nothing,不会静默拿到未过滤的补充来源。
 
 ## 0.1.22 - 2026-07-22
 

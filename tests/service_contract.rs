@@ -354,6 +354,96 @@ impl SourceProvider for FirecrawlLikeSourceProvider {
     }
 }
 
+/// Models the primary (Tavily) leg yielding nothing usable — e.g. every hit
+/// discarded by the relevance-score filter, or a genuinely empty result.
+struct EmptySearchSourceProvider;
+
+#[async_trait]
+impl SourceProvider for EmptySearchSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("empty provider fetch"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A filter-constrained request must never receive supplemental sources from
+// the filter-blind fallback provider: Firecrawl ignores SearchFilters, so
+// falling through would silently drop the caller's include/exclude/recency
+// constraints. Constrained requests are Tavily-or-nothing.
+#[tokio::test]
+async fn constrained_search_never_falls_through_to_filter_blind_fallback() {
+    let service = SearchService::fake_custom(
+        None,
+        Arc::new(EmptySearchSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "rmcp Rust MCP SDK release".to_string(),
+            include_domains: vec!["github.com".to_string()],
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("search output");
+
+    assert!(!output.fallback_used);
+    assert!(
+        output
+            .sources
+            .iter()
+            .all(|source| !source.url.contains("firecrawl.example")),
+        "constrained request must not surface filter-blind fallback sources: {:?}",
+        output.sources
+    );
+}
+
+// Unconstrained requests keep the legacy resilience: an empty primary result
+// still falls through to the fallback provider for enrichment.
+#[tokio::test]
+async fn unconstrained_search_still_falls_through_to_fallback_enrichment() {
+    let service = SearchService::fake_custom(
+        None,
+        Arc::new(EmptySearchSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "rmcp Rust MCP SDK release".to_string(),
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("search output");
+
+    assert!(!output.fallback_used);
+    assert!(
+        output
+            .sources
+            .iter()
+            .any(|source| source.provider == "firecrawl_enrichment"
+                && source.url.contains("firecrawl.example")),
+        "unconstrained request must still enrich via the fallback provider: {:?}",
+        output.sources
+    );
+}
+
 struct AlwaysErrExtractor;
 
 #[async_trait]
