@@ -2,6 +2,20 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## Unreleased
+
+### Added
+
+- **`web_fetch` 新增 GitHub Release 专项抽取器(`source_type: github_release`)。**
+  此前 release 页只能走 generic 抓取,而 GitHub 前端是 JS 渲染的,抓到的多为
+  "{{ message }}"、fork/star 按钮等模板噪音(实测 original_length 仅 ~1.4k,
+  release notes 基本丢失)。现在 `/releases/tag/<tag>` 与 `/releases/latest`
+  两类 URL 改走 GitHub REST API(`GET /repos/{owner}/{repo}/releases/tags/{tag}`
+  / `…/releases/latest`),输出 tag、发布日期、作者、prerelease 标记与完整
+  release notes Markdown。复用 `GITHUB_TOKEN` 认证(未配置时走匿名限流路径);
+  API 失败时按既有语义回退 generic 并携带 `fallback_reason`。release 列表页
+  (`/releases`)与资产下载链接(`/releases/download/…`)保持 generic 路径不变。
+
 ## 0.1.22 - 2026-07-22
 
 ### Added

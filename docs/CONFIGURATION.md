@@ -147,7 +147,7 @@ Tavily/Firecrawl key required.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | unset | GitHub token for issue/PR fetches. Anonymous works but is capped at ~60 req/hr; a token raises the limit and allows private repos. |
+| `GITHUB_TOKEN` | unset | GitHub token for issue/PR/release fetches. Anonymous works but is capped at ~60 req/hr; a token raises the limit and allows private repos. |
 | `GROK_SEARCH_SOURCE_MAX_ANSWERS` | `5` | StackExchange answers rendered before the "more answers" fold. |
 | `GROK_SEARCH_SOURCE_MAX_COMMENTS` | `30` | GitHub / StackExchange comments rendered before folding. |
 | `GROK_SEARCH_ENRICH_CONCURRENCY` | `3` | Parallel source enrichments when `web_search` is called with `include_content: true`. Clamped to `1..=5`. |

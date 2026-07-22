@@ -12,7 +12,7 @@
 
 - 🔎 **Live web search** with cited sources, cached for follow‑up `get_sources` calls. Opt‑in `include_content` enriches the top sources with full extracted text in one call.
 - 📏 **Response budgeting** — `web_search` keeps responses inside agent context limits: only the top `max_inline_sources` carry inline text, a whole‑response char budget (`response_max_chars`, default 45k — sized to stay under the MCP client token ceiling after JSON serialization) trims tail sources with recovery notes, `response_format: "concise" | "detailed"` picks the payload size, and `get_sources` pages through cached sources with `offset`/`limit`. The session cache always keeps full content.
-- 🧩 **Structured `web_fetch`** — GitHub issues/PRs, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic Tavily → Firecrawl chain. Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
+- 🧩 **Structured `web_fetch`** — GitHub issues/PRs/releases, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, release notes, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic Tavily → Firecrawl chain. Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
 - 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
 - 🔐 **Optional Grok OAuth mode** — `login/status/logout` commands store a local xAI OAuth token for Responses auth, so the MCP server can run without `GROK_SEARCH_API_KEY`.
 - 🌐 **Optional remote mode** — build with `--features http` to serve the same tools over **Streamable HTTP** (multi‑tenant, bring‑your‑own‑key via request headers) for mobile / multi‑device access. See [self-hosting](#self-hosting-remote-http).
@@ -195,7 +195,7 @@ Notes:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GITHUB_TOKEN` | unset | Authenticates GitHub issue/PR fetches (higher API rate limit; private repos). Specialist works unauthenticated but is rate‑limited. |
+| `GITHUB_TOKEN` | unset | Authenticates GitHub issue/PR/release fetches (higher API rate limit; private repos). Specialist works unauthenticated but is rate‑limited. |
 | `GROK_SEARCH_SOURCE_MAX_ANSWERS` | `5` | StackExchange answers rendered before folding. |
 | `GROK_SEARCH_SOURCE_MAX_COMMENTS` | `30` | GitHub / StackExchange comments rendered before folding. |
 | `GROK_SEARCH_ENRICH_CONCURRENCY` | `3` | Parallel source enrichments for `web_search` `include_content` (clamped 1..5). |

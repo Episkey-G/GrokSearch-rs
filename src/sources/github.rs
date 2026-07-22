@@ -27,11 +27,25 @@ pub struct GithubComment {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct GithubReleaseRaw {
+    pub tag: String,
+    pub name: String,
+    pub author: String,
+    pub published_at: String,
+    pub prerelease: bool,
+    pub body: String,
+}
+
 pub struct GithubIssueExtractor {
     pub token: Option<String>,
 }
 
 pub struct GithubPrExtractor {
+    pub token: Option<String>,
+}
+
+pub struct GithubReleaseExtractor {
     pub token: Option<String>,
 }
 
@@ -44,6 +58,27 @@ fn matches_github(url: &Url, segment_kind: &str) -> bool {
         None => return false,
     };
     segs.len() == 4 && segs[2] == segment_kind && segs[3].parse::<u64>().is_ok()
+}
+
+/// `/owner/repo/releases/tag/<tag>` and `/owner/repo/releases/latest` pages.
+/// The release list (`/releases`) and asset downloads (`/releases/download/…`)
+/// stay on the generic path.
+fn matches_github_release(url: &Url) -> bool {
+    if url.host_str() != Some("github.com") {
+        return false;
+    }
+    let segs: Vec<&str> = match url.path_segments() {
+        Some(it) => it.filter(|s| !s.is_empty()).collect(),
+        None => return false,
+    };
+    if segs.len() < 4 || segs[2] != "releases" {
+        return false;
+    }
+    match segs.len() {
+        4 => segs[3] == "latest",
+        5 => segs[3] == "tag",
+        _ => false,
+    }
 }
 
 /// Page size for any comment list. `/comments` endpoints default to 30 results
@@ -253,6 +288,94 @@ pub fn render(raw: &GithubRaw, caps: &SourceCaps) -> String {
     out
 }
 
+/// REST endpoint for a matched release URL. `segs` are the non-empty path
+/// segments. The tag segment is spliced still percent-encoded: `path_segments`
+/// does not decode, and the API path expects the same encoding the web URL
+/// uses (tags containing `/` arrive as one `%2F` segment).
+fn release_api_url(segs: &[String]) -> String {
+    let (owner, repo) = (&segs[0], &segs[1]);
+    if segs.len() == 5 {
+        format!(
+            "https://api.github.com/repos/{owner}/{repo}/releases/tags/{}",
+            segs[4]
+        )
+    } else {
+        format!("https://api.github.com/repos/{owner}/{repo}/releases/latest")
+    }
+}
+
+/// Map a `GET /repos/{o}/{r}/releases/…` response to `GithubReleaseRaw`.
+/// Pure (no I/O) so it can be unit-tested offline against a fixture. A payload
+/// without `tag_name` is rejected rather than rendered as an empty shell.
+pub fn parse_release(json: &serde_json::Value) -> Result<GithubReleaseRaw> {
+    let tag = str_field(json, "tag_name");
+    if tag.is_empty() {
+        return Err(crate::error::GrokSearchError::Provider(
+            "github: release payload missing tag_name".into(),
+        ));
+    }
+    Ok(GithubReleaseRaw {
+        tag,
+        name: str_field(json, "name"),
+        author: json
+            .get("author")
+            .and_then(|u| u.get("login"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        published_at: str_field(json, "published_at"),
+        prerelease: json
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        body: str_field(json, "body"),
+    })
+}
+
+pub(crate) async fn fetch_release(
+    client: &Client,
+    url: &Url,
+    token: Option<&str>,
+) -> Result<GithubReleaseRaw> {
+    let segs: Vec<String> = url
+        .path_segments()
+        .map(|it| it.filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    if segs.len() < 4 {
+        return Err(crate::error::GrokSearchError::Parse(
+            "github: unexpected release URL shape".into(),
+        ));
+    }
+
+    let auth = token.map(|t| format!("Bearer {t}"));
+    let mut headers: Vec<(reqwest::header::HeaderName, &str)> = vec![(USER_AGENT, UA)];
+    if let Some(ref a) = auth {
+        headers.push((AUTHORIZATION, a.as_str()));
+    }
+
+    let json = get_json(client, &release_api_url(&segs), &headers, "github_release").await?;
+    parse_release(&json)
+}
+
+/// Releases have no comment thread to fold, so caps are unused; the parameter
+/// keeps the render signature uniform across specialists.
+pub fn render_release(raw: &GithubReleaseRaw, _caps: &SourceCaps) -> String {
+    let title = if raw.name.trim().is_empty() {
+        &raw.tag
+    } else {
+        &raw.name
+    };
+    let mut out = format!("# {title}\n\n");
+    let pre_suffix = if raw.prerelease { " (prerelease)" } else { "" };
+    out.push_str(&format!("**Tag:** {}{}\n", raw.tag, pre_suffix));
+    if !raw.published_at.is_empty() {
+        out.push_str(&format!("**Published:** {}\n", raw.published_at));
+    }
+    out.push_str(&format!("**Author:** {}\n", raw.author));
+    out.push_str(&format!("\n{}\n", raw.body));
+    out
+}
+
 #[async_trait]
 impl SourceExtractor for GithubIssueExtractor {
     fn matches(&self, url: &Url) -> bool {
@@ -278,6 +401,20 @@ impl SourceExtractor for GithubPrExtractor {
     async fn fetch_render(&self, client: &Client, url: &Url, caps: &SourceCaps) -> Result<String> {
         let raw = fetch(client, url, self.token.as_deref(), true, caps.max_comments).await?;
         Ok(render(&raw, caps))
+    }
+}
+
+#[async_trait]
+impl SourceExtractor for GithubReleaseExtractor {
+    fn matches(&self, url: &Url) -> bool {
+        matches_github_release(url)
+    }
+    fn kind(&self) -> SourceType {
+        SourceType::GithubRelease
+    }
+    async fn fetch_render(&self, client: &Client, url: &Url, caps: &SourceCaps) -> Result<String> {
+        let raw = fetch_release(client, url, self.token.as_deref()).await?;
+        Ok(render_release(&raw, caps))
     }
 }
 
@@ -332,5 +469,35 @@ mod tests {
         assert_eq!(out[0].author, "dave");
         assert_eq!(out[0].body, "hi");
         assert_eq!(out[0].created_at, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn release_api_url_targets_tag_and_latest_endpoints() {
+        let tag: Vec<String> = ["o", "r", "releases", "tag", "v1.2.3"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            release_api_url(&tag),
+            "https://api.github.com/repos/o/r/releases/tags/v1.2.3"
+        );
+        let latest: Vec<String> = ["o", "r", "releases", "latest"].map(String::from).to_vec();
+        assert_eq!(
+            release_api_url(&latest),
+            "https://api.github.com/repos/o/r/releases/latest"
+        );
+    }
+
+    #[test]
+    fn release_api_url_keeps_tag_percent_encoding() {
+        // Tags containing `/` arrive percent-encoded as a single path segment
+        // and must stay encoded in the API path.
+        let segs: Vec<String> = ["o", "r", "releases", "tag", "releases%2Fv1.0"]
+            .map(String::from)
+            .to_vec();
+        assert!(
+            release_api_url(&segs).ends_with("/releases/tags/releases%2Fv1.0"),
+            "got: {}",
+            release_api_url(&segs)
+        );
     }
 }
