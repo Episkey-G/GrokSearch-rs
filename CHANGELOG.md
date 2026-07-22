@@ -4,6 +4,16 @@ All notable changes to GrokSearch-rs are documented here.
 
 ## Unreleased
 
+### Changed
+
+- **MCP `web_search` 不再暴露 `model` / `platform` 入参(#15)。** 此前工具 schema
+  把这两个字段作为无约束的自由字符串开放给调用方 LLM,客户端模型会自行填写——
+  例如把 `model` 填成并不存在的 `grok-4`——从而覆盖运营方在 `GROK_SEARCH_MODEL`
+  配置的默认模型,并把无效模型名透传给上游。现在 schema 不再声明这两个参数、
+  服务端也忽略任何传入值:Grok 模型只由运营方配置(`GROK_SEARCH_MODEL`)或按
+  请求的 `X-Grok-Model` 头决定,不再受调用方 AI 影响;focus platform 同理不再
+  由 AI 指定。
+
 ## 0.1.20 - 2026-07-21
 
 ### Added
