@@ -4,6 +4,15 @@ All notable changes to GrokSearch-rs are documented here.
 
 ## Unreleased
 
+### Added
+
+- **`Dockerfile.deploy` 多平台镜像(amd64/arm64)。** 运行时镜像按 BuildKit 的
+  `TARGETPLATFORM` 从 `dist/<os>/<arch>/` 选取预编译 musl 二进制;新增
+  `scripts/build-deploy-dist.sh` 用 cargo-zigbuild 一键交叉编译并装配 `dist/`
+  布局,`docker buildx build --platform linux/amd64,linux/arm64` 即可产出多架构
+  镜像,单平台 `docker build` 仍跟随宿主架构(构建上下文由
+  `Dockerfile.deploy.dockerignore` 收敛为仅 `dist/`)。
+
 ## 0.1.20 - 2026-07-21
 
 ### Added

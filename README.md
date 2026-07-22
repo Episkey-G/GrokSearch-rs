@@ -250,7 +250,8 @@ GROK_MCP_BIND=127.0.0.1:8080 target/release-http/grok-search-rs --http   # bind 
 ```
 
 Put a TLS‑terminating reverse proxy (e.g. Caddy) in front. The repo ships a `Dockerfile`,
-`Dockerfile.deploy` (runtime‑only, for low‑RAM hosts), `docker-compose.yml`, and `Caddyfile`
+`Dockerfile.deploy` (runtime‑only, multi‑arch `amd64`/`arm64` — cross‑compile the binaries
+first with `scripts/build-deploy-dist.sh`; ideal for low‑RAM hosts), `docker-compose.yml`, and `Caddyfile`
 for a one‑command deploy with automatic HTTPS. Set `MCP_HOSTNAME` (your domain or a
 `<dashed-ip>.sslip.io` name) via the environment or a git‑ignored `.env` — **not** in the
 repo.

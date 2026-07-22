@@ -1,4 +1,5 @@
 /target/
+/dist/
 /tmp/
 /logs/
 /.ace-tool/

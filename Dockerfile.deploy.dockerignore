@@ -1,0 +1,5 @@
+# Per-Dockerfile ignore file (BuildKit picks it over .dockerignore when
+# building with -f Dockerfile.deploy): the deploy image only COPYs the
+# pre-built binaries, so keep the build context to dist/ alone.
+*
+!dist

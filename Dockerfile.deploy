@@ -1,13 +1,18 @@
 # Runtime-only image: copies a pre-built static musl binary (no in-container
-# compile), so it builds instantly even on a 1 GB box. Build the binary first
-# on a capable machine:
-#   cargo zigbuild --profile release-http --features http --target x86_64-unknown-linux-musl
-# then place target/.../release-http/grok-search-rs next to this file and:
+# compile), so it builds instantly even on a 1 GB box. Cross-compile the
+# binaries first on a capable machine (any host OS/arch):
+#   scripts/build-deploy-dist.sh   # -> dist/linux/{amd64,arm64}/grok-search-rs
+# Build for the host platform:
 #   docker build -f Dockerfile.deploy -t grok-search-rs:deploy .
+# Or emit a multi-platform manifest (push to a registry, or containerd store):
+#   docker buildx build -f Dockerfile.deploy \
+#     --platform linux/amd64,linux/arm64 -t <registry>/grok-search-rs:deploy --push .
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates \
     && adduser -D -H -s /sbin/nologin grokmcp
-COPY grok-search-rs /usr/local/bin/grok-search-rs
+# BuildKit sets TARGETPLATFORM per output platform (linux/amd64, linux/arm64, ...).
+ARG TARGETPLATFORM
+COPY dist/${TARGETPLATFORM}/grok-search-rs /usr/local/bin/grok-search-rs
 ENV GROK_MCP_BIND=0.0.0.0:8080
 EXPOSE 8080
 USER grokmcp
