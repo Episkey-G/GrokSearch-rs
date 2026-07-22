@@ -31,8 +31,17 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      # Both release artifact families are gated here: the default build ships
+      # the stdio binaries, `--features http` ships the server binaries/image
+      # (release.yml builds both with --locked).
+      - name: cargo clippy (stdio)
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test
+      - name: cargo clippy (http)
+        run: cargo clippy --locked --all-targets --features http -- -D warnings
+
+      - name: cargo test (stdio)
+        run: cargo test --locked
+
+      - name: cargo test (http)
+        run: cargo test --locked --features http
