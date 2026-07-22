@@ -44,6 +44,36 @@ impl Source {
     }
 }
 
+/// A fetched page from a generic source provider: markdown content plus any
+/// structured metadata the provider returned alongside it. Metadata fields are
+/// best-effort — `None` whenever the provider response lacks them (Tavily
+/// extract carries a title but no date; Firecrawl scrape carries both).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedPage {
+    pub content: String,
+    pub title: Option<String>,
+    pub published_date: Option<String>,
+}
+
+impl FetchedPage {
+    /// A page with content only — for providers/paths with no metadata.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            title: None,
+            published_date: None,
+        }
+    }
+}
+
+/// Upstream annotation payloads have been observed carrying the citation index
+/// as the title (`"1"`, `"2"` — issue #21); single characters and purely
+/// numeric strings are those artifacts, never real page titles.
+pub fn is_junk_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    trimmed.chars().count() <= 1 || trimmed.chars().all(|c| c.is_ascii_digit())
+}
+
 pub fn merge_sources(primary: Vec<Source>, secondary: Vec<Source>) -> Vec<Source> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();

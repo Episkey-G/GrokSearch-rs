@@ -11,7 +11,7 @@ use crate::error::{GrokSearchError, Result};
 use crate::model::search::{
     ContentBlock, SearchFilters, SearchMessage, SearchRequest, SearchResponse, SearchTool,
 };
-use crate::model::source::{merge_sources, Source};
+use crate::model::source::{is_junk_title, merge_sources, FetchedPage, Source};
 use crate::model::tool::{GetSourcesOutput, WebFetchOutput, WebSearchInput, WebSearchOutput};
 use crate::providers::firecrawl::FirecrawlProvider;
 use crate::providers::grok::GrokResponsesProvider;
@@ -30,7 +30,7 @@ pub trait SourceProvider: Send + Sync {
         max_results: usize,
         filters: &SearchFilters,
     ) -> Result<Vec<Source>>;
-    async fn fetch(&self, url: &str) -> Result<String>;
+    async fn fetch(&self, url: &str) -> Result<FetchedPage>;
     async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>>;
 }
 
@@ -59,7 +59,7 @@ impl SourceProvider for TavilyProvider {
         self.search(query, max_results, filters).await
     }
 
-    async fn fetch(&self, url: &str) -> Result<String> {
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
         self.extract(url).await
     }
 
@@ -80,7 +80,7 @@ impl SourceProvider for FirecrawlProvider {
         FirecrawlProvider::search(self, query, max_results).await
     }
 
-    async fn fetch(&self, url: &str) -> Result<String> {
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
         FirecrawlProvider::scrape(self, url).await
     }
 
@@ -781,7 +781,9 @@ impl SearchService {
     }
 
     async fn web_fetch_raw(&self, url: &str) -> Result<String> {
-        generic_source_fetch(&self.sources, &self.fallback_sources, url).await
+        generic_source_fetch(&self.sources, &self.fallback_sources, url)
+            .await
+            .map(|page| page.content)
     }
 
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
@@ -1074,10 +1076,10 @@ async fn generic_source_fetch(
     primary: &Option<Arc<dyn SourceProvider>>,
     fallback: &Option<Arc<dyn SourceProvider>>,
     url: &str,
-) -> Result<String> {
+) -> Result<FetchedPage> {
     let primary_err = match primary {
         Some(provider) => match provider.fetch(url).await {
-            Ok(content) if !content.trim().is_empty() => return Ok(content),
+            Ok(page) if !page.content.trim().is_empty() => return Ok(page),
             Ok(_) => GrokSearchError::Provider(format!("Tavily returned empty content for {url}")),
             Err(err) => err,
         },
@@ -1089,6 +1091,77 @@ async fn generic_source_fetch(
     }
 }
 
+/// One enrichment outcome: the content to store plus any metadata backfill
+/// harvested from the fetched page. Failure notes never carry metadata.
+struct EnrichedFetch {
+    content: Option<String>,
+    title: Option<String>,
+    published_date: Option<String>,
+}
+
+impl EnrichedFetch {
+    /// A deterministic failure note stored as content — never a title source.
+    fn note(note: String) -> Self {
+        Self {
+            content: Some(note),
+            title: None,
+            published_date: None,
+        }
+    }
+
+    /// Specialist markdown: heading fallback only (specialist extractors
+    /// return no structured metadata). Heading extraction runs before
+    /// truncation so a tight `max_chars` cannot cut the title line in half.
+    fn from_markdown(md: String, max_chars: usize) -> Self {
+        let title = first_markdown_heading(&md);
+        Self {
+            content: Some(md.chars().take(max_chars).collect()),
+            title,
+            published_date: None,
+        }
+    }
+
+    /// Generic provider page: provider metadata first, heading as fallback.
+    fn from_page(page: FetchedPage, max_chars: usize) -> Self {
+        let title = page
+            .title
+            .filter(|title| !is_junk_title(title))
+            .or_else(|| first_markdown_heading(&page.content));
+        Self {
+            content: Some(page.content.chars().take(max_chars).collect()),
+            title,
+            published_date: page.published_date,
+        }
+    }
+}
+
+/// Headings longer than this are prose that happens to start with `#`, not a
+/// plausible page title.
+const MAX_HEADING_TITLE_CHARS: usize = 200;
+
+/// First ATX heading (`# ` … `###### `) in the fetched markdown, as a
+/// title-of-last-resort for sources whose provider returned none. Only the
+/// first heading is considered — if it is junk or oversized, guessing a later
+/// section heading would mislabel the page, so the title stays `None`.
+fn first_markdown_heading(markdown: &str) -> Option<String> {
+    let heading = markdown.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if hashes == 0 || hashes > 6 {
+            return None;
+        }
+        // ATX requires whitespace after the marker run; "#hashtag" is prose.
+        let rest = &trimmed[hashes..];
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let text = rest.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })?;
+    (heading.chars().count() <= MAX_HEADING_TITLE_CHARS && !is_junk_title(&heading))
+        .then_some(heading)
+}
+
 /// Concurrently back-fill `Source.content` for the first `max_sources` sources
 /// via the Phase 1 `resolve_content` pipeline; later sources stay
 /// metadata-only (content = None) so a Grok response with dozens of citations
@@ -1098,7 +1171,8 @@ async fn generic_source_fetch(
 /// ends with `content = Some(..)` — real markdown (truncated to `max_chars`)
 /// on success, or a deterministic `_Failed to retrieve: ..._` note on any
 /// failure/timeout/invalid-url (D-05 within the inline window: never None,
-/// never empty). Source order is preserved.
+/// never empty). Source order is preserved. While content is in hand, missing
+/// `title`/`published_date` are back-filled from the fetched page (issue #21).
 #[allow(clippy::too_many_arguments)]
 async fn enrich_sources(
     sources: Vec<Source>,
@@ -1113,7 +1187,7 @@ async fn enrich_sources(
     fallback: Option<Arc<dyn SourceProvider>>,
 ) -> Vec<Source> {
     let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut set: tokio::task::JoinSet<(usize, Option<String>)> = tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<(usize, EnrichedFetch)> = tokio::task::JoinSet::new();
 
     for (idx, source) in sources.iter().enumerate().take(max_sources) {
         let permit = Arc::clone(&sem);
@@ -1128,17 +1202,14 @@ async fn enrich_sources(
             // acquire is micro-second scale for concurrency<=5; deadline
             // enforcement applies to the resolve_content call itself.
             let _permit = permit.acquire_owned().await.ok();
-            let content = match url::Url::parse(&url_str) {
-                Err(_) => Some(format!(
+            let fetched = match url::Url::parse(&url_str) {
+                Err(_) => EnrichedFetch::note(format!(
                     "_Failed to retrieve: invalid_url_\n\nSource: {url_str}"
                 )),
                 Ok(parsed) => {
                     let future = crate::sources::resolve_content(&client, &parsed, &router, &caps);
                     match tokio::time::timeout_at(deadline, future).await {
-                        Ok(Ok((md, _kind))) => {
-                            let truncated: String = md.chars().take(max_chars).collect();
-                            Some(truncated)
-                        }
+                        Ok(Ok((md, _kind))) => EnrichedFetch::from_markdown(md, max_chars),
                         // Specialist produced no content — either no specialist
                         // matched (generic URL) OR a matched specialist's API
                         // failed/rate-limited/rendered empty. Either way, mirror
@@ -1150,29 +1221,26 @@ async fn enrich_sources(
                         Ok(Err(reason)) => {
                             let generic = generic_source_fetch(&primary, &fallback, &url_str);
                             match tokio::time::timeout_at(deadline, generic).await {
-                                Ok(Ok(md)) => {
-                                    let truncated: String = md.chars().take(max_chars).collect();
-                                    Some(truncated)
-                                }
-                                Ok(Err(_)) => Some(format!(
+                                Ok(Ok(page)) => EnrichedFetch::from_page(page, max_chars),
+                                Ok(Err(_)) => EnrichedFetch::note(format!(
                                     "_Failed to retrieve: {reason}_\n\nSource: {url_str}"
                                 )),
-                                Err(_elapsed) => Some(format!(
+                                Err(_elapsed) => EnrichedFetch::note(format!(
                                     "_Failed to retrieve: timeout_\n\nSource: {url_str}"
                                 )),
                             }
                         }
-                        Err(_elapsed) => Some(format!(
+                        Err(_elapsed) => EnrichedFetch::note(format!(
                             "_Failed to retrieve: timeout_\n\nSource: {url_str}"
                         )),
                     }
                 }
             };
-            (idx, content)
+            (idx, fetched)
         });
     }
 
-    let mut results: Vec<(usize, Option<String>)> = Vec::with_capacity(sources.len());
+    let mut results: Vec<(usize, EnrichedFetch)> = Vec::with_capacity(sources.len());
     while let Some(res) = set.join_next().await {
         if let Ok(pair) = res {
             results.push(pair);
@@ -1181,8 +1249,19 @@ async fn enrich_sources(
 
     results.sort_by_key(|(idx, _)| *idx);
     let mut out = sources;
-    for (idx, content) in results {
-        out[idx].content = content;
+    for (idx, fetched) in results {
+        let source = &mut out[idx];
+        source.content = fetched.content;
+        // Metadata backfill (issue #21): most Grok citations arrive as bare
+        // URLs, so the fetched page is the only place a title/date can come
+        // from. Fill only what upstream never provided — real upstream
+        // metadata always wins, and un-enriched tail sources keep honest nulls.
+        if source.title.is_none() {
+            source.title = fetched.title;
+        }
+        if source.published_date.is_none() {
+            source.published_date = fetched.published_date;
+        }
     }
     out
 }
@@ -1363,8 +1442,8 @@ impl SourceProvider for FakeSourceProvider {
             .collect())
     }
 
-    async fn fetch(&self, url: &str) -> Result<String> {
-        Ok(format!("Fetched content from {url}"))
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text(format!("Fetched content from {url}")))
     }
 
     async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
@@ -1676,7 +1755,7 @@ mod enrich_tests {
                 .map(|idx| Source::new(format!("https://example.com/source-{idx}"), "tavily"))
                 .collect())
         }
-        async fn fetch(&self, _url: &str) -> Result<String> {
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
             Err(crate::error::GrokSearchError::Provider(
                 "generic fetch unavailable".to_string(),
             ))
@@ -1699,8 +1778,8 @@ mod enrich_tests {
         ) -> Result<Vec<Source>> {
             Ok(Vec::new())
         }
-        async fn fetch(&self, _url: &str) -> Result<String> {
-            Ok("  \n".to_string())
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage::text("  \n"))
         }
         async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
             Ok(Vec::new())
@@ -1967,12 +2046,13 @@ mod enrich_tests {
     async fn generic_fetch_primary_failure_still_rescued_by_fallback() {
         let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(SearchOkFetchErrProvider));
         let fallback: Option<Arc<dyn SourceProvider>> = Some(Arc::new(FakeSourceProvider));
-        let content = generic_source_fetch(&primary, &fallback, "https://example.com")
+        let page = generic_source_fetch(&primary, &fallback, "https://example.com")
             .await
             .expect("fallback must rescue primary failure");
         assert!(
-            content.starts_with("Fetched content from"),
-            "fallback content expected, got: {content:?}"
+            page.content.starts_with("Fetched content from"),
+            "fallback content expected, got: {:?}",
+            page.content
         );
     }
 
@@ -2070,6 +2150,203 @@ mod enrich_tests {
             );
         }
     }
+
+    /// Always-matching extractor returning markdown with a leading heading.
+    struct HeadingExtractor {
+        markdown: &'static str,
+    }
+    #[async_trait]
+    impl SourceExtractor for HeadingExtractor {
+        fn matches(&self, _url: &Url) -> bool {
+            true
+        }
+        fn kind(&self) -> SourceType {
+            SourceType::Wikipedia
+        }
+        async fn fetch_render(
+            &self,
+            _c: &reqwest::Client,
+            _u: &Url,
+            _caps: &SourceCaps,
+        ) -> Result<String> {
+            Ok(self.markdown.to_string())
+        }
+    }
+
+    /// Generic provider whose fetch returns a page with full metadata.
+    struct MetaFetchProvider;
+    #[async_trait]
+    impl SourceProvider for MetaFetchProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage {
+                content: "Page body.".to_string(),
+                title: Some("Provider Title".to_string()),
+                published_date: Some("2026-06-19T06:15:24-08:00".to_string()),
+            })
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Drive enrich_sources directly with a permissive deadline/caps so the
+    /// backfill rules can be asserted without a full web_search round-trip.
+    async fn run_enrich(
+        sources: Vec<Source>,
+        router: SourceRouter,
+        primary: Option<Arc<dyn SourceProvider>>,
+        max_sources: usize,
+    ) -> Vec<Source> {
+        enrich_sources(
+            sources,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            &crate::providers::http::build_client(Duration::from_secs(5)),
+            &Arc::new(router),
+            SourceCaps {
+                max_answers: 3,
+                max_comments: 3,
+            },
+            4,
+            15_000,
+            max_sources,
+            primary,
+            None,
+        )
+        .await
+    }
+
+    fn bare_source(url: &str) -> Source {
+        Source::new(url, "grok_responses")
+    }
+
+    #[tokio::test]
+    async fn backfill_title_from_specialist_heading() {
+        let router = SourceRouter::with_extractors(vec![Box::new(HeadingExtractor {
+            markdown: "# Real Title\n\nBody text.",
+        })]);
+        let out = run_enrich(vec![bare_source("https://example.com/a")], router, None, 5).await;
+
+        assert_eq!(out[0].title.as_deref(), Some("Real Title"));
+        assert_eq!(out[0].published_date, None, "specialists carry no date");
+    }
+
+    #[tokio::test]
+    async fn backfill_metadata_from_generic_provider() {
+        // Empty router → no specialist matches → generic provider fetch path.
+        let out = run_enrich(
+            vec![bare_source("https://example.com/a")],
+            SourceRouter::with_extractors(Vec::new()),
+            Some(Arc::new(MetaFetchProvider)),
+            5,
+        )
+        .await;
+
+        assert_eq!(out[0].title.as_deref(), Some("Provider Title"));
+        assert_eq!(
+            out[0].published_date.as_deref(),
+            Some("2026-06-19T06:15:24-08:00")
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_never_overwrites_upstream_metadata() {
+        let source = bare_source("https://example.com/a")
+            .with_title("Upstream Title")
+            .with_published_date("2020-01-01");
+        let out = run_enrich(
+            vec![source],
+            SourceRouter::with_extractors(Vec::new()),
+            Some(Arc::new(MetaFetchProvider)),
+            5,
+        )
+        .await;
+
+        assert_eq!(out[0].title.as_deref(), Some("Upstream Title"));
+        assert_eq!(out[0].published_date.as_deref(), Some("2020-01-01"));
+    }
+
+    #[tokio::test]
+    async fn backfill_skipped_on_failed_fetch() {
+        // No specialist + failing generic fetch → failure note, no metadata.
+        let out = run_enrich(
+            vec![bare_source("https://example.com/a")],
+            SourceRouter::with_extractors(Vec::new()),
+            Some(Arc::new(SearchOkFetchErrProvider)),
+            5,
+        )
+        .await;
+
+        assert!(out[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("_Failed to retrieve:"));
+        assert_eq!(out[0].title, None, "failure notes must not become titles");
+        assert_eq!(out[0].published_date, None);
+    }
+
+    #[tokio::test]
+    async fn backfill_rejects_junk_heading() {
+        // First heading is a citation-index artifact — no guessing from later
+        // section headings either.
+        let router = SourceRouter::with_extractors(vec![Box::new(HeadingExtractor {
+            markdown: "# 1\n\n## Real Section\n\nBody.",
+        })]);
+        let out = run_enrich(vec![bare_source("https://example.com/a")], router, None, 5).await;
+
+        assert_eq!(out[0].title, None);
+    }
+
+    #[tokio::test]
+    async fn backfill_leaves_tail_beyond_window_untouched() {
+        let router = SourceRouter::with_extractors(vec![Box::new(HeadingExtractor {
+            markdown: "# Real Title\n\nBody.",
+        })]);
+        let sources = vec![
+            bare_source("https://example.com/a"),
+            bare_source("https://example.com/b"),
+        ];
+        let out = run_enrich(sources, router, None, 1).await;
+
+        assert_eq!(out[0].title.as_deref(), Some("Real Title"));
+        assert_eq!(out[1].title, None, "un-enriched tail keeps honest nulls");
+        assert_eq!(out[1].content, None);
+    }
+
+    #[test]
+    fn first_markdown_heading_extracts_and_rejects() {
+        assert_eq!(
+            first_markdown_heading("# Title Line\nbody"),
+            Some("Title Line".to_string())
+        );
+        assert_eq!(
+            first_markdown_heading("prose first\n\n## Section Two\n"),
+            Some("Section Two".to_string()),
+            "first heading may appear after prose"
+        );
+        assert_eq!(first_markdown_heading("no headings at all"), None);
+        assert_eq!(
+            first_markdown_heading("#hashtag is prose"),
+            None,
+            "ATX heading requires whitespace after the marker"
+        );
+        assert_eq!(first_markdown_heading("####### seven hashes"), None);
+        assert_eq!(
+            first_markdown_heading("# 1\n\n# Real"),
+            None,
+            "junk first heading must not fall through to later ones"
+        );
+        let oversized = format!("# {}", "x".repeat(MAX_HEADING_TITLE_CHARS + 1));
+        assert_eq!(first_markdown_heading(&oversized), None);
+    }
 }
 
 #[cfg(test)]
@@ -2134,10 +2411,10 @@ mod request_scope_tests {
             )]))
             .expect("same-tenant scoped service");
         // Seed under the tenant-namespaced key, as web_search would.
-        same.cache
-            .lock()
-            .await
-            .set(same.tenant_cache_key(session), Arc::new(Vec::<Source>::new()));
+        same.cache.lock().await.set(
+            same.tenant_cache_key(session),
+            Arc::new(Vec::<Source>::new()),
+        );
         assert!(
             same.get_sources(session, 0, None).await.is_ok(),
             "same tenant must read its own cached session"
@@ -2145,10 +2422,7 @@ mod request_scope_tests {
 
         // A different caller key must NOT read that session.
         let other = svc
-            .with_config(Config::from_env_map([(
-                "GROK_SEARCH_API_KEY",
-                "xai-other",
-            )]))
+            .with_config(Config::from_env_map([("GROK_SEARCH_API_KEY", "xai-other")]))
             .expect("other-tenant scoped service");
         assert!(
             other.get_sources(session, 0, None).await.is_err(),

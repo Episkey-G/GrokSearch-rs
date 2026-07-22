@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use grok_search_rs::error::Result;
 use grok_search_rs::model::search::SearchFilters;
-use grok_search_rs::model::source::Source;
+use grok_search_rs::model::source::{FetchedPage, Source};
 use grok_search_rs::model::tool::WebSearchInput;
 use grok_search_rs::service::{SearchService, SourceProvider};
 
@@ -32,8 +32,8 @@ impl SourceProvider for FixedLenFetchProvider {
             .collect())
     }
 
-    async fn fetch(&self, _url: &str) -> Result<String> {
-        Ok("x".repeat(self.len))
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("x".repeat(self.len)))
     }
 
     async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
@@ -241,8 +241,8 @@ impl SourceProvider for MetadataHeavyProvider {
             .collect())
     }
 
-    async fn fetch(&self, _url: &str) -> Result<String> {
-        Ok("body".to_string())
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("body"))
     }
 
     async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {

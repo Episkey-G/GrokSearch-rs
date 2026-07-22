@@ -1,7 +1,7 @@
 use grok_search_rs::model::search::SearchFilters;
 use grok_search_rs::model::source::Source;
 use grok_search_rs::providers::tavily::{
-    limit_tavily_results, normalize_tavily_results, tavily_map_request_body,
+    limit_tavily_results, normalize_tavily_results, parse_tavily_extract, tavily_map_request_body,
     tavily_search_request_body,
 };
 
@@ -62,6 +62,57 @@ fn tavily_search_body_serializes_filters() {
         serde_json::json!(["github.com", "news.ycombinator.com"])
     );
     assert_eq!(body["exclude_domains"], serde_json::json!(["example.com"]));
+}
+
+// The extract endpoint returns `title` alongside `raw_content` (verified live
+// against api.tavily.com — the docs' sample response omits it) but no
+// published-date field. Metadata must survive parsing so enrichment-time
+// backfill (issue #21) can use it.
+#[test]
+fn extract_parses_content_and_title() {
+    let raw = serde_json::json!({
+        "results": [
+            {
+                "url": "https://example.com/post",
+                "raw_content": "# Heading\n\nBody.",
+                "title": "Example Post Title",
+                "images": []
+            }
+        ],
+        "failed_results": []
+    });
+
+    let page = parse_tavily_extract(&raw).expect("page");
+
+    assert_eq!(page.content, "# Heading\n\nBody.");
+    assert_eq!(page.title.as_deref(), Some("Example Post Title"));
+    assert_eq!(page.published_date, None);
+}
+
+#[test]
+fn extract_tolerates_missing_or_blank_title() {
+    let raw = serde_json::json!({
+        "results": [
+            {"url": "https://example.com/a", "raw_content": "Body.", "title": "   "}
+        ]
+    });
+
+    let page = parse_tavily_extract(&raw).expect("page");
+
+    assert_eq!(page.content, "Body.");
+    assert_eq!(page.title, None, "blank titles must normalize to None");
+}
+
+#[test]
+fn extract_empty_content_still_errors() {
+    let raw = serde_json::json!({
+        "results": [
+            {"url": "https://example.com/a", "raw_content": "  ", "title": "Has Title"}
+        ]
+    });
+
+    let err = parse_tavily_extract(&raw).expect_err("empty content must error");
+    assert!(err.to_string().contains("empty content"), "got: {err}");
 }
 
 #[test]

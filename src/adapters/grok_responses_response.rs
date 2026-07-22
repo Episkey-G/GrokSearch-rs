@@ -90,7 +90,14 @@ fn collect_one_source(item: &Value, sources: &mut Vec<Source>) {
     };
 
     let mut source = Source::new(url, "grok_responses");
-    if let Some(title) = item.get("title").and_then(Value::as_str) {
+    // Junk guard (issue #21): live api.x.ai annotations carry the citation
+    // index as the title ("1", "2"). Dropping them here keeps the field None
+    // so enrichment-time backfill is allowed to fill in a real title later.
+    if let Some(title) = item
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !crate::model::source::is_junk_title(title))
+    {
         source = source.with_title(title);
     }
     if let Some(description) = item

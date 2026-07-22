@@ -1,5 +1,5 @@
 use crate::error::{GrokSearchError, Result};
-use crate::model::source::Source;
+use crate::model::source::{FetchedPage, Source};
 use crate::providers::http::{build_client, post_json};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -38,28 +38,59 @@ impl FirecrawlProvider {
         Ok(normalize_firecrawl_results(&raw))
     }
 
-    pub async fn scrape(&self, url: &str) -> Result<String> {
+    pub async fn scrape(&self, url: &str) -> Result<FetchedPage> {
         let raw = self
             .post("scrape", &json!({ "url": url, "formats": ["markdown"] }))
             .await?;
-        let content = raw
-            .get("data")
-            .and_then(|data| data.get("markdown").or_else(|| data.get("content")))
-            .or_else(|| raw.get("markdown"))
-            .or_else(|| raw.get("content"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|text| !text.trim().is_empty());
-
-        content.ok_or_else(|| {
-            GrokSearchError::Provider("Firecrawl scrape returned empty content".to_string())
-        })
+        parse_firecrawl_scrape(&raw)
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}", self.api_url, path.trim_start_matches('/'));
         post_json(&self.client, &endpoint, &self.api_key, body, "Firecrawl").await
     }
+}
+
+/// Parse a Firecrawl scrape response into content + metadata. Scrape responses
+/// carry a rich `metadata` object (`title`, `publishedTime`,
+/// `article:published_time`, OG tags, …) next to the markdown; both the
+/// wrapped (`data.markdown`) and flat (`markdown`) response shapes are
+/// accepted, mirroring the content lookup.
+pub fn parse_firecrawl_scrape(raw: &Value) -> Result<FetchedPage> {
+    let content = raw
+        .get("data")
+        .and_then(|data| data.get("markdown").or_else(|| data.get("content")))
+        .or_else(|| raw.get("markdown"))
+        .or_else(|| raw.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty());
+
+    let Some(content) = content else {
+        return Err(GrokSearchError::Provider(
+            "Firecrawl scrape returned empty content".to_string(),
+        ));
+    };
+    let metadata = raw
+        .get("data")
+        .and_then(|data| data.get("metadata"))
+        .or_else(|| raw.get("metadata"));
+    let non_empty = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|text| !text.trim().is_empty())
+    };
+    let title = non_empty(metadata.and_then(|m| m.get("title")));
+    let published_date = non_empty(metadata.and_then(|m| {
+        m.get("publishedTime")
+            .or_else(|| m.get("article:published_time"))
+    }));
+    Ok(FetchedPage {
+        content,
+        title,
+        published_date,
+    })
 }
 
 pub fn normalize_firecrawl_results(raw: &Value) -> Vec<Source> {

@@ -4,6 +4,19 @@ All notable changes to GrokSearch-rs are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **`grok_responses` 来源的 `title`/`published_date` 不再几乎恒为 null(#21)。**
+  多数 Grok 引文以裸 URL 或内联 `[[n]](url)` 形式到达,结构上不携带元数据;
+  少数结构化 annotation 甚至把引文序号("1"、"2")当作 title。现在解析层拒收
+  纯数字/单字符的垃圾 title,enrichment 阶段在抓取正文的同时回填缺失元数据:
+  title 优先取源提供商的结构化字段(Tavily extract 的 `title`、Firecrawl 的
+  `metadata.title`),否则回退到正文首个 Markdown 标题;published_date 仅在
+  提供商返回时回填(Firecrawl `publishedTime` / `article:published_time`)。
+  只回填 None 字段,上游真实元数据永不覆盖;抓取失败与未 enrich 的尾部来源
+  保持诚实的 null。`SourceProvider::fetch` 相应改为返回结构化 `FetchedPage`
+  (content + title + published_date),`web_fetch` 行为不变。
+
 ### Added
 
 - **`Dockerfile.deploy` 多平台镜像(amd64/arm64)。** 运行时镜像按 BuildKit 的

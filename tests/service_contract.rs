@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use grok_search_rs::error::{GrokSearchError, Result};
 use grok_search_rs::model::search::{SearchFilters, SearchRequest, SearchResponse};
-use grok_search_rs::model::source::Source;
+use grok_search_rs::model::source::{FetchedPage, Source};
 use grok_search_rs::model::tool::WebSearchInput;
 use grok_search_rs::service::{AiProvider, SearchService, SourceProvider};
 use grok_search_rs::sources::{SourceCaps, SourceExtractor, SourceRouter, SourceType};
@@ -74,8 +74,8 @@ impl SourceProvider for CountingSourceProvider {
             .collect())
     }
 
-    async fn fetch(&self, _url: &str) -> Result<String> {
-        Ok("fetched".to_string())
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
     }
 
     async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
@@ -315,7 +315,7 @@ impl SourceProvider for FailingSourceProvider {
         ))
     }
 
-    async fn fetch(&self, _url: &str) -> Result<String> {
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
         Err(grok_search_rs::error::GrokSearchError::Provider(
             "fetch failed".to_string(),
         ))
@@ -343,8 +343,10 @@ impl SourceProvider for FirecrawlLikeSourceProvider {
             .collect())
     }
 
-    async fn fetch(&self, url: &str) -> Result<String> {
-        Ok(format!("firecrawl fallback content for {url}"))
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text(format!(
+            "firecrawl fallback content for {url}"
+        )))
     }
 
     async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
@@ -501,8 +503,8 @@ impl SourceProvider for LongFetchSourceProvider {
         Ok(Vec::new())
     }
 
-    async fn fetch(&self, _url: &str) -> Result<String> {
-        Ok("abcdefghijklmnop".to_string())
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("abcdefghijklmnop"))
     }
 
     async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {

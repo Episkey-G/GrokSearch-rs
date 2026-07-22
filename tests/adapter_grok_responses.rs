@@ -90,6 +90,50 @@ fn parses_grok_responses_text_annotations_and_search_call_sources() {
         .any(|source| source.url == "https://platform.openai.com/docs"));
 }
 
+// Live api.x.ai annotation objects have been observed carrying the citation
+// index as the title ("1", "2" — issue #21). Those must be rejected at parse
+// time so the field stays None and enrichment-time backfill can supply a real
+// title; genuine titles must keep flowing through untouched.
+#[test]
+fn rejects_citation_index_titles_keeps_real_ones() {
+    let raw = serde_json::json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "sources": [
+                        {"url": "https://example.com/a", "title": "1"},
+                        {"url": "https://example.com/b", "title": "42"},
+                        {"url": "https://example.com/c", "title": "x"},
+                        {"url": "https://example.com/d", "title": " Real Page Title "}
+                    ]
+                }
+            }
+        ],
+        "output_text": "answer"
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    let title_of = |url: &str| {
+        parsed
+            .sources
+            .iter()
+            .find(|s| s.url == url)
+            .expect("source present")
+            .title
+            .clone()
+    };
+    assert_eq!(title_of("https://example.com/a"), None, "numeric index");
+    assert_eq!(title_of("https://example.com/b"), None, "multi-digit index");
+    assert_eq!(title_of("https://example.com/c"), None, "single char");
+    assert_eq!(
+        title_of("https://example.com/d"),
+        Some(" Real Page Title ".to_string()),
+        "real titles must pass through unchanged"
+    );
+}
+
 #[test]
 fn parses_output_text_fallback() {
     let raw = serde_json::json!({

@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::model::search::SearchFilters;
-use crate::model::source::Source;
+use crate::model::source::{FetchedPage, Source};
 use crate::providers::http::{build_client, post_json_with_status};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -129,22 +129,11 @@ impl TavilyProvider {
         Ok(normalize_tavily_results(&raw))
     }
 
-    pub async fn extract(&self, url: &str) -> Result<String> {
+    pub async fn extract(&self, url: &str) -> Result<FetchedPage> {
         let raw = self
             .post("extract", &json!({ "urls": [url], "format": "markdown" }))
             .await?;
-        let extracted = raw
-            .get("results")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|item| item.get("raw_content").or_else(|| item.get("content")))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|text| !text.trim().is_empty());
-
-        extracted.ok_or_else(|| {
-            GrokSearchError::Provider("Tavily extract returned empty content".to_string())
-        })
+        parse_tavily_extract(&raw)
     }
 
     pub async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
@@ -237,6 +226,38 @@ pub fn tavily_map_request_body(url: &str, max_results: usize) -> Value {
 pub fn limit_tavily_results(mut sources: Vec<Source>, max_results: usize) -> Vec<Source> {
     sources.truncate(max_results);
     sources
+}
+
+/// Parse a Tavily extract response into content + metadata. The extract
+/// endpoint returns `title` alongside `raw_content` (verified live; the docs'
+/// sample response omits it) but no published-date field, so `published_date`
+/// is always `None` here.
+pub fn parse_tavily_extract(raw: &Value) -> Result<FetchedPage> {
+    let result = raw
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let content = result
+        .and_then(|item| item.get("raw_content").or_else(|| item.get("content")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty());
+
+    let Some(content) = content else {
+        return Err(GrokSearchError::Provider(
+            "Tavily extract returned empty content".to_string(),
+        ));
+    };
+    let title = result
+        .and_then(|item| item.get("title"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty());
+    Ok(FetchedPage {
+        content,
+        title,
+        published_date: None,
+    })
 }
 
 pub fn normalize_tavily_results(raw: &Value) -> Vec<Source> {
