@@ -106,8 +106,12 @@ async fn key_scoped_failure_rotates_to_next_key_and_succeeds() {
         .expect("second key should succeed after 429 on first");
 
     assert_eq!(sources.len(), 1);
+    // The random start offset picks either key first, so assert order-independently:
+    // the 429 must rotate to the *other* key, leaving each key used exactly once.
+    let mut seen = auth_log.lock().expect("auth log lock").clone();
+    seen.sort();
     assert_eq!(
-        *auth_log.lock().expect("auth log lock"),
+        seen,
         vec!["Bearer key-a".to_string(), "Bearer key-b".to_string()],
         "expected the 429 to trigger a retry with the next key"
     );
@@ -157,8 +161,12 @@ async fn successive_requests_round_robin_across_keys() {
             .expect("mock returns 200");
     }
 
+    // Random start offset means either key can go first; assert order-independently
+    // that both keys were each used exactly once (round-robin covered the full ring).
+    let mut seen = auth_log.lock().expect("auth log lock").clone();
+    seen.sort();
     assert_eq!(
-        *auth_log.lock().expect("auth log lock"),
+        seen,
         vec!["Bearer key-a".to_string(), "Bearer key-b".to_string()],
         "two successful requests should consume credits from different keys"
     );
