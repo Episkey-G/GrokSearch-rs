@@ -260,6 +260,19 @@ pub fn parse_tavily_extract(raw: &Value) -> Result<FetchedPage> {
     })
 }
 
+/// Search results whose Tavily relevance `score` falls below this are junk,
+/// not evidence. Long natural-language queries can drift Tavily onto one
+/// generic word — observed live with "latest rmcp Rust MCP SDK release
+/// version and what changed": dictionary and news-portal pages for "latest"
+/// all scored ≤ 0.04, while on-topic results for answerable queries score
+/// ≥ 0.49. 0.1 clears the junk band ~2.5x with ~5x headroom below on-topic
+/// results. Items with no score (map results, API drift) always pass.
+const MIN_SEARCH_SCORE: f64 = 0.1;
+
+/// Normalize a Tavily `search`/`map` response into `Source`s. Search items
+/// scoring below [`MIN_SEARCH_SCORE`] are dropped so keyword-drift junk never
+/// reaches the enrichment/fallback source lists; score-less items (the map
+/// endpoint returns bare URL strings) are kept unconditionally.
 pub fn normalize_tavily_results(raw: &Value) -> Vec<Source> {
     raw.get("results")
         .and_then(Value::as_array)
@@ -270,6 +283,13 @@ pub fn normalize_tavily_results(raw: &Value) -> Vec<Source> {
                 return Some(Source::new(url, "tavily"));
             }
             let url = item.get("url").and_then(Value::as_str)?;
+            if item
+                .get("score")
+                .and_then(Value::as_f64)
+                .is_some_and(|score| score < MIN_SEARCH_SCORE)
+            {
+                return None;
+            }
             let mut source = Source::new(url, "tavily");
             if let Some(title) = item.get("title").and_then(Value::as_str) {
                 source = source.with_title(title);

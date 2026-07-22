@@ -2,6 +2,20 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **`tavily_enrichment` 补充来源不再混入与查询无关的低质页面。** `web_search`
+  把用户的自然语言 query 原样透传给 Tavily,长句易被单个通用词带偏——实测
+  "latest rmcp Rust MCP SDK release version and what changed" 返回的 5 条补充
+  结果全是 "latest" 的词典释义页与新闻门户首页(Tavily 自身相关性 score 仅
+  0.030–0.040,正常在题结果 ≥ 0.49),此前解析层丢弃 score 字段照单全收,
+  垃圾页面以 `tavily_enrichment`/`tavily_fallback` 身份进入输出并浪费
+  enrichment 抓取与响应预算。现在 `normalize_tavily_results` 丢弃 score <
+  0.1 的搜索结果:全部被过滤时 speculative 预取自然落到 Firecrawl 兜底,
+  无 score 的条目(map 端点、API 演进)照旧保留,`web_map` 行为不变。
+
 ## 0.1.22 - 2026-07-22
 
 ### Added
