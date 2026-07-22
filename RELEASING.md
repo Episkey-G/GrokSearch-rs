@@ -15,10 +15,11 @@ git push origin v0.1.5
 
 That's all. Pushing the tag triggers `release.yml`, which then:
 
-1. Injects `0.1.5` into `Cargo.toml` (in CI working tree) and builds cross-platform binaries
+1. Injects `0.1.5` into `Cargo.toml` (in CI working tree) and builds cross-platform binaries — stdio builds for all five platforms, plus `-http` server builds (`--features http`, `release-http` profile) for Linux x86_64/aarch64
 2. Creates the GitHub Release with archives + `SHA256SUMS`
-3. Publishes the 6 npm packages (main + 5 platform sub-packages) with version `0.1.5`
-4. **Commits the version bump back to `main`** so `Cargo.toml`, `Cargo.lock`, and all `package.json` files stay in sync with the latest release
+3. Pushes the multi-arch (`amd64`/`arm64`) server image to `ghcr.io/episkey-g/grok-search-rs` tagged `X.Y.Z` + `latest` (built from the `-http` binaries via `Dockerfile.deploy`)
+4. Publishes the 6 npm packages (main + 5 platform sub-packages) with version `0.1.5`
+5. **Commits the version bump back to `main`** so `Cargo.toml`, `Cargo.lock`, and all `package.json` files stay in sync with the latest release
 
 ## Manual fallback (rarely needed)
 
@@ -43,6 +44,7 @@ Both predate the tag-triggered auto-sync and remain for offline use.
 
 ## Verify after release
 
-- GitHub release page lists 5 archives + `SHA256SUMS`
+- GitHub release page lists 7 archives (5 stdio + 2 `-http` Linux) + `SHA256SUMS`
 - `npx grok-search-rs@X.Y.Z --help` works
+- `docker pull ghcr.io/episkey-g/grok-search-rs:X.Y.Z` resolves on both amd64 and arm64
 - `main` has a `chore: sync manifests to X.Y.Z` commit from `github-actions[bot]`

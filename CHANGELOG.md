@@ -2,6 +2,20 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## Unreleased
+
+### Added
+
+- **发版产物新增 HTTP 服务端形态(免本机编译)。** 此前 GitHub Release / npm 的
+  全部二进制均为 stdio-only(HTTP 传输在编译期 feature 门控),想自托管远程
+  MCP 只能源码编译——低内存/小硬盘的 ARM 板(如 RK3399)上极易 OOM、爆盘。
+  现在 tag 发版额外产出:(1) `grok-search-rs-http_Linux_{x86_64,aarch64}.tar.gz`
+  静态 musl 服务端二进制(`--features http` + `release-http` profile),下载
+  即可 `--http` 起服;(2) 多架构(amd64/arm64)运行时镜像推送到
+  `ghcr.io/episkey-g/grok-search-rs`(`X.Y.Z` + `latest` 标签,基于
+  `Dockerfile.deploy`),`docker pull` 即得对应架构。macOS/Windows 资产保持
+  stdio-only 不变。
+
 ## 0.1.21 - 2026-07-21
 
 ### Fixed

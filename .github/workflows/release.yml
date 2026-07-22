@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-release:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,6 +30,25 @@ jobs:
             asset_name: grok-search-rs_Linux_aarch64.tar.gz
             universal: false
             cross: true
+          # HTTP server builds (`--features http`, release-http profile): the
+          # Streamable HTTP transport is compile-time gated, so the default
+          # assets above cannot serve remote MCP. These two Linux assets are
+          # what self-hosters (and the GHCR image below) run; macOS/Windows
+          # stay stdio-only on purpose.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: grok-search-rs
+            asset_name: grok-search-rs-http_Linux_x86_64.tar.gz
+            universal: false
+            cross: false
+            http: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: grok-search-rs
+            asset_name: grok-search-rs-http_Linux_aarch64.tar.gz
+            universal: false
+            cross: true
+            http: true
           - target: universal-apple-darwin
             os: macos-latest
             artifact_name: grok-search-rs
@@ -94,7 +113,7 @@ jobs:
 
       - name: Build with cross
         if: matrix.cross == true
-        run: cross build --release --target ${{ matrix.target }} --locked
+        run: cross build ${{ matrix.http == true && '--profile release-http --features http' || '--release' }} --target ${{ matrix.target }} --locked
 
       - name: Build universal macOS
         if: matrix.universal == true
@@ -107,19 +126,18 @@ jobs:
 
       - name: Build
         if: matrix.universal != true && matrix.cross != true
-        run: cargo build --release --target ${{ matrix.target }} --locked
+        run: cargo build ${{ matrix.http == true && '--profile release-http --features http' || '--release' }} --target ${{ matrix.target }} --locked
 
       - name: Package Unix
         if: matrix.os != 'windows-latest'
         run: |
+          # http builds land in the release-http profile directory.
+          PROFILE_DIR=${{ matrix.http == true && 'release-http' || 'release' }}
           if [ "${{ matrix.universal }}" = "true" ]; then
             cd target/release
             tar czf ../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
-          elif [ "${{ matrix.cross }}" = "true" ]; then
-            cd target/${{ matrix.target }}/release
-            tar czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
           else
-            cd target/${{ matrix.target }}/release
+            cd target/${{ matrix.target }}/$PROFILE_DIR
             tar czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
           fi
 
@@ -183,6 +201,68 @@ jobs:
             flat/*.tar.gz
             flat/*.zip
             flat/SHA256SUMS
+
+  publish-image:
+    name: Publish multi-arch image to GHCR
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download http binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: grok-search-rs-http_Linux_*.tar.gz
+          path: http-artifacts
+
+      # Dockerfile.deploy COPYs dist/${TARGETPLATFORM}/grok-search-rs; its
+      # .dockerignore keeps the build context to dist/ alone.
+      - name: Lay out dist/ for Dockerfile.deploy
+        run: |
+          mkdir -p dist/linux/amd64 dist/linux/arm64
+          tar -xzf http-artifacts/grok-search-rs-http_Linux_x86_64.tar.gz/grok-search-rs-http_Linux_x86_64.tar.gz -C dist/linux/amd64
+          tar -xzf http-artifacts/grok-search-rs-http_Linux_aarch64.tar.gz/grok-search-rs-http_Linux_aarch64.tar.gz -C dist/linux/arm64
+          chmod 0755 dist/linux/amd64/grok-search-rs dist/linux/arm64/grok-search-rs
+          ls -lR dist
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/grok-search-rs
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      # The image always builds (validating Dockerfile.deploy + dist layout
+      # even on workflow_dispatch runs); pushing is tag-gated.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.deploy
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
   publish-npm-platforms:
     name: Publish ${{ matrix.platform }} to npm

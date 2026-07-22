@@ -258,6 +258,19 @@ A missing required key returns `401` (fail‑closed); OAuth is rejected on this 
 `X-Grok-Base-Url` header (any public gateway is honored; internal/private addresses are rejected).
 The remote transport uses the Grok **Responses** API only; the OpenAI-compatible chat-completions transport is stdio-only.
 
+**No local build needed.** Every release ships ready‑to‑run server artifacts for Linux
+`x86_64` + `aarch64` (static musl) — ideal for low‑RAM/small‑disk boards where a native
+`cargo build` would OOM or fill the disk:
+
+- **Prebuilt binary** — download `grok-search-rs-http_Linux_<arch>.tar.gz` from the
+  [latest release](https://github.com/Episkey-G/GrokSearch-rs/releases/latest) and run
+  `GROK_MCP_BIND=0.0.0.0:8080 ./grok-search-rs --http`. (The plain `grok-search-rs_…`
+  assets are **stdio‑only**: the HTTP transport is compile‑time gated and not in them.)
+- **Docker image** — multi‑arch `amd64`/`arm64`:
+  `docker pull ghcr.io/episkey-g/grok-search-rs:latest` (serves on `:8080`).
+
+Building from source instead:
+
 ```bash
 cargo build --profile release-http --features http    # release-http => panic=unwind (handler panic won't kill the server)
 GROK_MCP_BIND=127.0.0.1:8080 target/release-http/grok-search-rs --http   # bind loopback; terminate TLS upstream
