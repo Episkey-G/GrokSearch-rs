@@ -8,6 +8,60 @@ GrokSearch-rs reads configuration from two sources, merged with the following pr
 
 The config file is optional; missing files are skipped silently. See the [Config file](#config-file) section below for the TOML schema. The AI provider contract is intentionally narrow: configure a Grok/OpenAI-compatible root URL and the server calls `/v1/responses`.
 
+> **Configuring the remote HTTP transport?** The server stores no credentials — each request supplies its keys as **HTTP headers**, not env. The variable tables in this document use **env-key names**; the header for each is in the mapping table under [Configuration channels](#configuration-channels-stdio-env-vs-remote-headers) directly below.
+
+## Configuration channels (stdio env vs remote headers)
+
+Which channel carries your config is decided by the MCP **transport**, not a project setting — the two transports have no other way to receive per-instance config:
+
+- **stdio (local):** the MCP client spawns `grok-search-rs` as a child process and can only hand it **environment variables** (the `env` block in your client config). There is no HTTP, so there are no headers.
+- **Streamable HTTP (remote):** the client talks to an already-running, multi-tenant server that stores **no** credentials. The only per-request channel is **HTTP headers**; server-side env would be shared across every caller, so per-request secrets are deliberately never read from it.
+
+Both carry the **same configuration values** — only the delivery differs. Everything else in this document uses the **env-key** name; on the remote transport, send the matching header from this table:
+
+| Setting | stdio env key | remote HTTP header |
+|---|---|---|
+| Grok API key | `GROK_SEARCH_API_KEY` | `X-Grok-Api-Key` |
+| Grok gateway URL | `GROK_SEARCH_URL` | `X-Grok-Base-Url` |
+| Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
+| Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
+| Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
+| GitHub token | `GITHUB_TOKEN` | `X-GitHub-Token` |
+
+Only these six are accepted as headers — the caller's per-request secrets plus the gateway/model that pair with the caller's key. Most other settings here (timeouts, budgets, enrichment knobs, Tavily/Firecrawl base URLs, feature toggles) are **operator-fixed**: set once in the server's own environment, never per request. `GROK_SEARCH_URL` / `GROK_SEARCH_MODEL` have operator defaults too; the `X-Grok-Base-Url` / `X-Grok-Model` headers override them per request. **Two groups are stdio-only — stripped over HTTP, not operator-fixed:** OAuth (`GROK_SEARCH_AUTH_MODE` / `GROK_SEARCH_AUTH_FILE`) and the OpenAI-compatible chat-completions transport (`OPENAI_COMPATIBLE_API_URL` / `_API_KEY` / `_MODEL`). The remote server serves Grok **Responses** only; to run a chat-completions relay, use the stdio transport.
+
+The header is `X-` + the env key in `Kebab-Case`, but a few names are historical (the `GROK_SEARCH_` prefix collapses to `X-Grok-`, and `GROK_SEARCH_URL` → `X-Grok-Base-Url`) — **read names off the table above rather than deriving them by hand.**
+
+### Minimal setup — each transport
+
+Remote (hosted or self-hosted) — headers:
+
+```bash
+claude mcp add --transport http grok-search-rs https://<host>/groksearch_rs/mcp \
+  --header "X-Grok-Api-Key: <key>" \
+  --header "X-Grok-Base-Url: https://<gateway>/v1" \
+  --header "X-Grok-Model: <model>" \
+  --header "X-Tavily-Api-Key: tvly-..."
+```
+
+Local (stdio) — the same values as `env`:
+
+```json
+{
+  "mcpServers": {
+    "grok-search-rs": {
+      "command": "grok-search-rs",
+      "env": {
+        "GROK_SEARCH_API_KEY": "<key>",
+        "GROK_SEARCH_URL": "https://<gateway>/v1",
+        "GROK_SEARCH_MODEL": "<model>",
+        "TAVILY_API_KEY": "tvly-..."
+      }
+    }
+  }
+}
+```
+
 ## Grok Responses
 
 | Variable | Default | Description |

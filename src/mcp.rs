@@ -140,14 +140,15 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
             })?;
             let input = WebSearchInput {
                 query: query.to_string(),
-                platform: args
-                    .get("platform")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                model: args
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                // model/platform are intentionally NOT read from tool input: the
+                // calling client's LLM must not choose the Grok model or focus
+                // platform (issue #15) — it hallucinates names like `grok-4` that
+                // override the operator's configured model. The model is fixed by
+                // config (GROK_SEARCH_MODEL) or the per-request X-Grok-Model
+                // header; leaving these None routes through the default in
+                // build_search_request.
+                platform: None,
+                model: None,
                 extra_sources: args
                     .get("extra_sources")
                     .and_then(Value::as_u64)
@@ -236,8 +237,6 @@ fn tools_list() -> Value {
                     "required": ["query"],
                     "properties": {
                         "query": { "type": "string" },
-                        "platform": { "type": "string" },
-                        "model": { "type": "string" },
                         "extra_sources": {
                             "type": "integer",
                             "minimum": 0,
@@ -545,6 +544,38 @@ mod tests {
         assert!(
             get_sources.contains("new search"),
             "get_sources: {get_sources}"
+        );
+    }
+
+    #[test]
+    fn web_search_schema_hides_model_and_platform() {
+        // issue #15: the calling client's LLM must not be offered `model` or
+        // `platform` — it fills them with hallucinated values (e.g. `grok-4`)
+        // that override the operator's configured model. The schema must not
+        // advertise them, so the client never learns they exist.
+        let listed = tools_list();
+        let tools = listed["tools"].as_array().expect("tools array");
+        let web_search = tools
+            .iter()
+            .find(|t| t["name"] == "web_search")
+            .expect("web_search tool present");
+        let props = web_search["inputSchema"]["properties"]
+            .as_object()
+            .expect("web_search inputSchema.properties object");
+
+        assert!(
+            !props.contains_key("model"),
+            "web_search must not expose `model`: {props:?}"
+        );
+        assert!(
+            !props.contains_key("platform"),
+            "web_search must not expose `platform`: {props:?}"
+        );
+        // Guard against an over-broad deletion: the real parameters stay.
+        assert!(props.contains_key("query"), "query must remain: {props:?}");
+        assert!(
+            props.contains_key("response_format"),
+            "response_format must remain: {props:?}"
         );
     }
 }

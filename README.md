@@ -107,7 +107,21 @@ server-side; best-effort availability. Prefer your own server? See [self-hosting
 
 ## Configuration
 
-Pick **one** transport group. Both Tavily and Firecrawl keys are shared across transports.
+The MCP **transport** decides how config reaches the server — same values, different channel (forced by the transport, not a project setting):
+
+- **stdio (local):** environment variables — the `env` block in your MCP client config.
+- **remote HTTP:** per-request HTTP headers — the server stores no keys.
+
+| Setting | stdio env | remote header |
+|---|---|---|
+| Grok API key | `GROK_SEARCH_API_KEY` | `X-Grok-Api-Key` |
+| Grok gateway URL | `GROK_SEARCH_URL` | `X-Grok-Base-Url` |
+| Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
+| Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
+| Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
+| GitHub token | `GITHUB_TOKEN` | `X-GitHub-Token` |
+
+The tables below use env-key names (they also drive `config.toml` / stdio); on the remote transport send the header from the row above. Full reference and per-transport examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md#configuration-channels-stdio-env-vs-remote-headers). Both Tavily and Firecrawl keys are shared across transports.
 
 ### A. Native Grok Responses (default)
 
