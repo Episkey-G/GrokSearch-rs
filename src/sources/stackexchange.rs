@@ -256,7 +256,11 @@ pub(crate) async fn fetch(client: &Client, url: &Url, max_answers: usize) -> Res
     };
 
     Ok(SeRaw {
-        title: decode_entities(item.get("title").and_then(|v| v.as_str()).unwrap_or_default()),
+        title: decode_entities(
+            item.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        ),
         body: field_str(item, "body_markdown", "body"),
         site,
         answers,
