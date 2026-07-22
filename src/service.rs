@@ -991,7 +991,7 @@ fn enrichment_label(origin: RawSourceOrigin) -> &'static str {
 fn fallback_label(origin: RawSourceOrigin) -> &'static str {
     match origin {
         RawSourceOrigin::Primary => "tavily_fallback",
-        RawSourceOrigin::Fallback => "firecrawl_enrichment",
+        RawSourceOrigin::Fallback => "firecrawl_fallback",
         RawSourceOrigin::None => "tavily_fallback",
     }
 }

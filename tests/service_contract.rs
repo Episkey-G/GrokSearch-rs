@@ -247,6 +247,49 @@ async fn web_search_falls_back_to_tavily_when_grok_has_no_sources() {
         .all(|item| item.provider == "tavily_fallback"));
 }
 
+// The `_fallback` suffix on `provider` is the per-source counterpart of
+// `fallback_used=true`: Firecrawl-origin fallback sources must be labeled
+// `firecrawl_fallback`, never the enrichment label.
+#[tokio::test]
+async fn web_search_falls_back_to_firecrawl_when_tavily_returns_nothing() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
+        Arc::new(FailingSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [("GROK_SEARCH_FALLBACK_SOURCES", "3")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "OpenAI official updates".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("fallback output");
+
+    assert_eq!(output.search_provider, "source_fallback");
+    assert!(output.fallback_used);
+    assert_eq!(
+        output.fallback_reason,
+        Some("grok_sources_empty".to_string())
+    );
+    assert_eq!(output.sources_count, 3);
+    assert!(output
+        .sources
+        .iter()
+        .all(|source| source.provider == "firecrawl_fallback"));
+
+    let cached = service
+        .get_sources(&output.session_id, 0, None)
+        .await
+        .expect("cached fallback sources");
+    assert_eq!(cached.sources_count, 3);
+    assert!(cached
+        .sources
+        .iter()
+        .all(|source| source.provider == "firecrawl_fallback"));
+}
+
 #[tokio::test]
 async fn fallback_honors_include_content_false() {
     // include_content=false is an explicit opt-out and must suppress inline

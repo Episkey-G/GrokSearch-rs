@@ -30,6 +30,14 @@ All notable changes to GrokSearch-rs are documented here.
   同时收紧兜底语义(Codex 评审):Firecrawl 完全无视
   include/exclude_domains 与 recency_days,带这些约束的请求不再落入
   Firecrawl——约束请求 Tavily-or-nothing,不会静默拿到未过滤的补充来源。
+- **fallback 路径的 Firecrawl 来源 `provider` 标签从 `firecrawl_enrichment` 修正为
+  `firecrawl_fallback`。** Grok 失败或不可验证、且 Tavily 无结果时,Firecrawl 兜底
+  来源此前被标为 `firecrawl_enrichment`,与同一响应的 `search_provider=source_fallback`
+  / `fallback_used=true` 自相矛盾——标签语义是「provider 名 + 路径后缀」,
+  `_enrichment` 仅指 Grok 成功后的补充来源,按后缀区分补充/兜底的客户端会把兜底
+  来源误判为补充来源。该错位源自最初 firecrawl 分支硬编码标签、忽略路径参数,
+  后续重构机械保留。现修正标签并补 fallback 路径 provenance 测试,
+  docs/ARCHITECTURE.md 的 provenance 枚举同步新增 `firecrawl_fallback`。
 
 ## 0.1.22 - 2026-07-22
 

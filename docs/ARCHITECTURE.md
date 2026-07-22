@@ -46,7 +46,8 @@ Sources retain their origin through the `provider` field:
 - `grok_responses`: native Responses citation or web search source.
 - `tavily_enrichment`: supplemental Tavily source after Grok succeeds.
 - `tavily_fallback`: Tavily source used because Grok failed or was unverifiable.
-- `firecrawl_enrichment`: Firecrawl source used when Tavily supplemental or fallback source lookup returns nothing.
+- `firecrawl_enrichment`: supplemental Firecrawl source after Grok succeeds, used when Tavily returns nothing.
+- `firecrawl_fallback`: Firecrawl source used because Grok failed or was unverifiable and Tavily returned nothing.
 - `tavily` / `firecrawl`: direct provider source before orchestration rewrites provenance.
 
 ## Fallback Rules
