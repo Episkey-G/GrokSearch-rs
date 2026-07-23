@@ -68,8 +68,7 @@ async fn async_main() -> anyhow::Result<()> {
             let bind: std::net::SocketAddr = addr
                 .parse()
                 .map_err(|err| anyhow::anyhow!("invalid GROK_MCP_BIND '{addr}': {err}"))?;
-            let base_env: std::collections::HashMap<String, String> =
-                std::env::vars().collect();
+            let base_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             return grok_search_rs::http::run_http(base_env, bind).await;
         }
     }
