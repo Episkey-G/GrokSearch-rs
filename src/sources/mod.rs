@@ -21,6 +21,7 @@ pub const NO_SPECIALIST_MATCH: &str = "no_specialist_match";
 pub enum SourceType {
     GithubIssue,
     GithubPull,
+    GithubRelease,
     Stackexchange,
     Arxiv,
     Wikipedia,
@@ -34,6 +35,7 @@ impl SourceType {
         match self {
             SourceType::GithubIssue => "github_issue",
             SourceType::GithubPull => "github_pull",
+            SourceType::GithubRelease => "github_release",
             SourceType::Stackexchange => "stackexchange",
             SourceType::Arxiv => "arxiv",
             SourceType::Wikipedia => "wikipedia",
@@ -105,6 +107,9 @@ impl SourceRouter {
                 token: config.github_token.clone(),
             }),
             Box::new(github::GithubPrExtractor {
+                token: config.github_token.clone(),
+            }),
+            Box::new(github::GithubReleaseExtractor {
                 token: config.github_token.clone(),
             }),
             Box::new(stackexchange::StackExchangeExtractor),
@@ -336,6 +341,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&SourceType::GithubPull).unwrap(),
             "\"github_pull\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SourceType::GithubRelease).unwrap(),
+            "\"github_release\""
         );
         assert_eq!(
             serde_json::to_string(&SourceType::Stackexchange).unwrap(),

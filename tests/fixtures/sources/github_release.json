@@ -1,0 +1,8 @@
+{
+  "tag_name": "rmcp-v2.2.0",
+  "name": "rmcp v2.2.0",
+  "prerelease": false,
+  "published_at": "2026-07-18T09:30:00Z",
+  "author": { "login": "alice" },
+  "body": "## What's Changed\n\n* feat: streamable HTTP transport by @alice in https://github.com/modelcontextprotocol/rust-sdk/pull/123\n* fix: session cleanup race by @bob in https://github.com/modelcontextprotocol/rust-sdk/pull/124\n\n**Full Changelog**: https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v2.1.0...rmcp-v2.2.0"
+}

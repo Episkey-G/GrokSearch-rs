@@ -1,6 +1,7 @@
 use grok_search_rs::sources::arxiv::{render as arxiv_render, ArxivExtractor};
 use grok_search_rs::sources::github::{
-    render as gh_render, GithubIssueExtractor, GithubPrExtractor, GithubRaw,
+    parse_release as gh_parse_release, render as gh_render, render_release as gh_render_release,
+    GithubIssueExtractor, GithubPrExtractor, GithubRaw, GithubReleaseExtractor, GithubReleaseRaw,
 };
 use grok_search_rs::sources::stackexchange::{render as se_render, SeRaw, StackExchangeExtractor};
 use grok_search_rs::sources::wikipedia::{
@@ -63,9 +64,93 @@ fn github_matcher_strict_positive_and_negative() {
         "https://gist.github.com/user/abc",
         "https://github.com/owner/repo/discussions/1",
         "https://github.com/owner/repo/blob/main/README.md",
+        "https://github.com/owner/repo/releases/tag/v1.0.0",
     ] {
         assert!(!issue.matches(&m(neg)), "issue should reject {neg}");
         assert!(!pr.matches(&m(neg)), "pr should reject {neg}");
+    }
+}
+
+fn release_fixture() -> GithubReleaseRaw {
+    let json: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/sources/github_release.json")).unwrap();
+    gh_parse_release(&json).expect("parse")
+}
+
+#[test]
+fn github_release_parse_extracts_tag_notes_and_metadata() {
+    let raw = release_fixture();
+    assert_eq!(raw.tag, "rmcp-v2.2.0");
+    assert_eq!(raw.name, "rmcp v2.2.0");
+    assert_eq!(raw.author, "alice");
+    assert_eq!(raw.published_at, "2026-07-18T09:30:00Z");
+    assert!(!raw.prerelease);
+    assert!(raw.body.contains("streamable HTTP transport"));
+}
+
+#[test]
+fn github_release_parse_rejects_payload_without_tag() {
+    let json = serde_json::json!({ "name": "x", "body": "notes" });
+    assert!(gh_parse_release(&json).is_err());
+}
+
+#[test]
+fn github_release_render_shows_title_tag_date_and_notes() {
+    let out = gh_render_release(&release_fixture(), &SourceCaps::default());
+    assert!(out.contains("# rmcp v2.2.0"), "title: {out}");
+    assert!(out.contains("**Tag:** rmcp-v2.2.0"), "tag: {out}");
+    assert!(
+        out.contains("**Published:** 2026-07-18T09:30:00Z"),
+        "date: {out}"
+    );
+    assert!(out.contains("**Author:** alice"), "author: {out}");
+    assert!(out.contains("What's Changed"), "notes: {out}");
+}
+
+#[test]
+fn github_release_render_falls_back_to_tag_title_and_marks_prerelease() {
+    let raw = GithubReleaseRaw {
+        tag: "v0.9.0-rc.1".into(),
+        name: "  ".into(),
+        author: "alice".into(),
+        published_at: String::new(),
+        prerelease: true,
+        body: "release candidate".into(),
+    };
+    let out = gh_render_release(&raw, &SourceCaps::default());
+    assert!(out.contains("# v0.9.0-rc.1"), "tag title: {out}");
+    assert!(out.contains("(prerelease)"), "prerelease marker: {out}");
+    assert!(
+        !out.contains("**Published:**"),
+        "empty date must fold: {out}"
+    );
+}
+
+#[test]
+fn github_release_matcher_tag_and_latest_positive() {
+    let rel = GithubReleaseExtractor { token: None };
+    let m = |u: &str| Url::parse(u).unwrap();
+    assert!(rel.matches(&m("https://github.com/owner/repo/releases/tag/v1.2.3")));
+    assert!(rel.matches(&m(
+        "https://github.com/modelcontextprotocol/rust-sdk/releases/tag/rmcp-v2.2.0"
+    )));
+    assert!(rel.matches(&m("https://github.com/owner/repo/releases/latest")));
+}
+
+#[test]
+fn github_release_matcher_negative() {
+    let rel = GithubReleaseExtractor { token: None };
+    let m = |u: &str| Url::parse(u).unwrap();
+    for neg in [
+        "https://github.com/owner/repo/releases",
+        "https://github.com/owner/repo/releases/tag/",
+        "https://github.com/owner/repo/releases/download/v1.0/pkg.tar.gz",
+        "https://github.com/owner/repo/releases/tag/v1.0/extra",
+        "https://github.com/owner/repo/releases/latest/extra",
+        "https://github.com/owner/repo/issues/42",
+        "https://gist.github.com/user/abc",
+    ] {
+        assert!(!rel.matches(&m(neg)), "should reject {neg}");
     }
 }
 

@@ -29,6 +29,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+PR CI runs these with `--locked` and repeats clippy/test with `--features http` (the deployed server build); when touching the HTTP path, run the `--features http` variants locally too.
+
 For documentation-only changes, at minimum inspect changed Markdown for stale command names and secret-like values.
 
 ## Releasing

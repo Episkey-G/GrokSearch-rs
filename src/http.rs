@@ -148,9 +148,7 @@ async fn mcp_post(State(state): State<AppState>, request: axum::extract::Request
     // Read the body under a hard size cap, now that the permit is held.
     let body = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
-        }
+        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
     };
 
     // 1. Origin validation (DNS-rebinding defense). Absent Origin (non-browser
@@ -350,8 +348,10 @@ fn sse_response(response: &Value) -> Response {
         CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/event-stream"),
     );
-    resp.headers_mut()
-        .insert(CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
+    resp.headers_mut().insert(
+        CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
     resp
 }
 
@@ -435,7 +435,12 @@ async fn validate_public_url(
             format!("resolver task failed: {err}"),
         )
     })?
-    .map_err(|err| (StatusCode::BAD_REQUEST, format!("cannot resolve host: {err}")))?;
+    .map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("cannot resolve host: {err}"),
+        )
+    })?;
 
     if resolved.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "host did not resolve".to_string()));
@@ -702,7 +707,9 @@ mod tests {
         }
         // Non-secret operator knobs survive.
         assert_eq!(
-            stripped.get("GROK_SEARCH_TIMEOUT_SECONDS").map(String::as_str),
+            stripped
+                .get("GROK_SEARCH_TIMEOUT_SECONDS")
+                .map(String::as_str),
             Some("30")
         );
     }
@@ -724,13 +731,13 @@ mod tests {
     async fn validate_public_url_blocks_ssrf_targets() {
         for bad in [
             "http://169.254.169.254/latest/meta-data/", // cloud metadata
-            "http://127.0.0.1/",                         // loopback
-            "http://10.0.0.5/",                          // private
-            "http://192.168.1.1/",                       // private
-            "http://100.64.0.1/",                        // CGNAT
-            "https://[::1]/",                            // IPv6 loopback
-            "file:///etc/passwd",                        // bad scheme
-            "gopher://example.com/",                     // bad scheme
+            "http://127.0.0.1/",                        // loopback
+            "http://10.0.0.5/",                         // private
+            "http://192.168.1.1/",                      // private
+            "http://100.64.0.1/",                       // CGNAT
+            "https://[::1]/",                           // IPv6 loopback
+            "file:///etc/passwd",                       // bad scheme
+            "gopher://example.com/",                    // bad scheme
         ] {
             assert!(
                 validate_public_url(bad, None).await.is_err(),

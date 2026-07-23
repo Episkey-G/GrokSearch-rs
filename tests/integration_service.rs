@@ -46,7 +46,7 @@ async fn full_service_web_search_via_chat_completions() {
     assert!(!out.content.trim().is_empty(), "content empty");
     eprintln!(
         "content head: {}",
-        &out.content.chars().take(200).collect::<String>()
+        out.content.chars().take(200).collect::<String>()
     );
     eprintln!("sources_count: {}", out.sources_count);
     eprintln!("session_id: {}", out.session_id);
