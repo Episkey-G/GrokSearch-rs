@@ -38,6 +38,30 @@ All notable changes to GrokSearch-rs are documented here.
   来源误判为补充来源。该错位源自最初 firecrawl 分支硬编码标签、忽略路径参数,
   后续重构机械保留。现修正标签并补 fallback 路径 provenance 测试,
   docs/ARCHITECTURE.md 的 provenance 枚举同步新增 `firecrawl_fallback`。
+- **兜底一条来源都没拿到时,`web_search` 不再返回「成功但空」的结果——改为报错。**
+  Grok 上游挂掉后走 `finalize_fallback`,若 Tavily/Firecrawl 也没产出任何来源,
+  此前仍返回 `Ok`:`sources_count: 0`、无 `isError`,正文写着「Source fallback
+  returned 0 source(s); evaluate them directly」——而一条来源都没有,原始 Grok
+  文本在这条路径上也是被丢弃的。客户端模型把它读成「工具是好的,只是这次没搜到」,
+  于是换个措辞重试,每次都走同一条死路径拿到同样的空壳成功,形成无限重试循环
+  (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
+  进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
+  以及「重试无用」的明确信号。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断为空的
+  情况单独给出自己的原因。兜底拿到来源时行为完全不变。
+- **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
+  `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
+  被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。
+  现在每条失败路径都记录成一句 note(如 `tavily: provider error: Tavily returned
+  HTTP 432 …`、`firecrawl: no API key (FIRECRAWL_API_KEY for stdio,
+  x-firecrawl-api-key header for the HTTP transport)`、`firecrawl: skipped
+  (request carries domain/recency filters …)`),汇总进上面那条错误消息。
+  note 只含 endpoint 与上游响应体,不含任何凭据。
+- **HTTP 传输启动时,会对被忽略的服务端凭据环境变量告警。** 远程传输按设计
+  剥离服务端的 `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` 等(凭据只来自请求头),
+  但此前是静默剥离:自托管者在 docker-compose 里配好 key,服务端看起来一切正常,
+  实际每个请求都在没有任何兜底 provider 的状态下跑,且没有任何线索指向原因。
+  现在 `run_http` 启动时对每个存在的被剥离变量打一行 warning,并指明应改用哪个
+  请求头(如 `x-tavily-api-key`)。只打变量名与请求头名,绝不打值。
 
 ## 0.1.22 - 2026-07-22
 

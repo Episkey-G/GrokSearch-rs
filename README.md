@@ -252,6 +252,11 @@ each pays with their own keys:
 - `X-Grok-Api-Key`, `X-Tavily-Api-Key`, `X-Firecrawl-Api-Key` (optional `X-GitHub-Token`)
 - Optional non‑secret overrides: `X-Grok-Base-Url` (gateway), `X-Grok-Model` (model name, since model ids are gateway‑specific)
 
+This cuts both ways: setting `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in the **server's** own
+environment (compose file, `.env`, systemd unit) has no effect — those are stripped from every
+per‑request config, so requests that don't carry the header run with no source fallback at all.
+The server logs a warning at startup for each such variable it finds.
+
 A missing required key returns `401` (fail‑closed); OAuth is rejected on this transport
 (stdio only). The operator sets the default Grok‑compatible gateway via `GROK_SEARCH_URL`
 (default `https://api.x.ai`), and callers may point at any other Grok‑compatible gateway with an

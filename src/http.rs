@@ -109,6 +109,7 @@ pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> an
     let http_client = crate::providers::http::build_restricted_client(operator_cfg.timeout);
     let cache = Arc::new(Mutex::new(SourceCache::new(operator_cfg.cache_size)));
     let allowed_origins = parse_allowed_origins(&base_env);
+    warn_ignored_secret_env(&base_env);
 
     let state = AppState {
         http_client,
@@ -589,6 +590,38 @@ fn strip_secrets(mut env: HashMap<String, String>) -> HashMap<String, String> {
     env
 }
 
+/// Warn once at startup for every credential env var the operator set that this
+/// transport ignores. [`strip_secrets`] drops them from every per-request config
+/// by design — keys come from headers — but it did so silently, so a self-hoster
+/// who put `TAVILY_API_KEY` in their compose file got a server that looked
+/// configured while every request ran with no source fallback at all. Prints
+/// variable and header *names* only, never a value.
+fn warn_ignored_secret_env(env: &HashMap<String, String>) {
+    for key in SECRET_ENV_KEYS {
+        if !env.get(*key).is_some_and(|value| !value.trim().is_empty()) {
+            continue;
+        }
+        match header_for_env(key) {
+            Some(header) => eprintln!(
+                "grok-search-rs: {key} is set in the server environment but the HTTP transport ignores it — callers must send the {header} request header instead"
+            ),
+            None => eprintln!(
+                "grok-search-rs: {key} is set in the server environment but the HTTP transport ignores it"
+            ),
+        }
+    }
+}
+
+/// The request header that carries `env_key` on this transport, if any. Header
+/// names are matched case-insensitively; this returns the lowercase spelling
+/// [`HEADER_TO_ENV`] stores.
+fn header_for_env(env_key: &str) -> Option<&'static str> {
+    HEADER_TO_ENV
+        .iter()
+        .find(|(_, key)| *key == env_key)
+        .map(|(header, _)| *header)
+}
+
 /// Parse `GROK_MCP_ALLOWED_ORIGINS` (comma-separated) into an allowlist.
 /// Unset/empty -> `None` (no browser-origin restriction; keys are per-request).
 fn parse_allowed_origins(env: &HashMap<String, String>) -> Option<HashSet<String>> {
@@ -621,6 +654,24 @@ mod tests {
 
     fn base() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    // Every stripped credential that has a header equivalent must be able to
+    // name it, so the startup warning tells the operator what to do instead of
+    // just what was ignored.
+    #[test]
+    fn header_for_env_names_the_credential_headers() {
+        assert_eq!(header_for_env("TAVILY_API_KEY"), Some("x-tavily-api-key"));
+        assert_eq!(
+            header_for_env("FIRECRAWL_API_KEY"),
+            Some("x-firecrawl-api-key")
+        );
+        assert_eq!(
+            header_for_env("GROK_SEARCH_API_KEY"),
+            Some("x-grok-api-key")
+        );
+        // Stripped but header-less: the warning falls back to the short form.
+        assert_eq!(header_for_env("GROK_SEARCH_AUTH_FILE"), None);
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

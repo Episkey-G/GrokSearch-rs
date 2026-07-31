@@ -290,6 +290,92 @@ async fn web_search_falls_back_to_firecrawl_when_tavily_returns_nothing() {
         .all(|source| source.provider == "firecrawl_fallback"));
 }
 
+// A dead Grok upstream plus a source fallback that produces nothing leaves
+// nothing to return at all — no answer, no evidence. Reporting that as a
+// successful empty search is what drove client models into endless retry
+// loops, so it must be a hard error naming the upstream reason and what each
+// source provider did.
+#[tokio::test]
+async fn web_search_errors_when_grok_and_every_source_provider_fail() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a zero-source fallback must fail rather than report success");
+
+    let message = err.to_string();
+    assert!(message.contains("grok_provider_error"), "{message}");
+    assert!(
+        message.contains("tavily: provider error: source failed"),
+        "{message}"
+    );
+    // An absent provider must name the header too: a self-hosted HTTP
+    // deployment ignores the server-side env key outright.
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(message.contains("x-firecrawl-api-key"), "{message}");
+    assert!(message.contains("Retrying will not help"), "{message}");
+}
+
+// Filter-constrained requests are Tavily-or-nothing by design (Firecrawl
+// cannot honor domain/recency filters). When that gate is what leaves the
+// response empty, the error has to say so — otherwise the operator sees a
+// configured Firecrawl key that never fires and no reason why.
+#[tokio::test]
+async fn web_search_error_names_the_filter_gate_that_skipped_firecrawl() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
+        Arc::new(FailingSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_domains: vec!["example.com".to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect_err("a filter-gated fallback with no tavily results must fail");
+
+    let message = err.to_string();
+    assert!(message.contains("grok_sources_empty"), "{message}");
+    assert!(message.contains("firecrawl: skipped"), "{message}");
+    assert!(message.contains("filters"), "{message}");
+}
+
+// The zero-source guard must stay off the degraded-but-useful path: a fallback
+// that produced evidence still returns Ok.
+#[tokio::test]
+async fn web_search_still_succeeds_when_fallback_has_sources() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(FailingSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [("GROK_SEARCH_FALLBACK_SOURCES", "2")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("a fallback that found sources still succeeds");
+
+    assert!(output.fallback_used);
+    assert_eq!(output.sources_count, 2);
+}
+
 #[tokio::test]
 async fn fallback_honors_include_content_false() {
     // include_content=false is an explicit opt-out and must suppress inline

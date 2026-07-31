@@ -494,8 +494,7 @@ impl SearchService {
         let grok_future = self.ai.search(&request);
         let speculative_future =
             self.fetch_raw_extra_sources(&input.query, speculative_count, &filters);
-        let (grok_result, (raw_sources, raw_origin)) =
-            tokio::join!(grok_future, speculative_future);
+        let (grok_result, raw) = tokio::join!(grok_future, speculative_future);
 
         let response = match grok_result {
             Ok(response) => response,
@@ -508,8 +507,7 @@ impl SearchService {
                             content: String::new(),
                             sources: Vec::new(),
                         },
-                        raw_sources,
-                        raw_origin,
+                        raw,
                         grok_error_reason(&err),
                         include_content,
                     )
@@ -519,21 +517,13 @@ impl SearchService {
 
         if let Some(reason) = grok_unverifiable_reason(&response) {
             return self
-                .finalize_fallback(
-                    deadline,
-                    session_id,
-                    response,
-                    raw_sources,
-                    raw_origin,
-                    reason,
-                    include_content,
-                )
+                .finalize_fallback(deadline, session_id, response, raw, reason, include_content)
                 .await;
         }
 
-        let mut enrichment = raw_sources;
+        let mut enrichment = raw.sources;
         enrichment.truncate(effective_extra_sources);
-        let enrichment = with_provider(enrichment, enrichment_label(raw_origin));
+        let enrichment = with_provider(enrichment, enrichment_label(raw.origin));
         let merged = merge_sources(response.sources, enrichment);
         // SRCH-04 dual gate (zero-regression): skip enrichment when the caller
         // opted out OR there are no supplemental sources. Gating on
@@ -592,21 +582,42 @@ impl SearchService {
     /// returned Vec carries each provider's native label ("tavily"/"firecrawl");
     /// the caller re-labels via `with_provider` once the path (enrichment vs
     /// fallback) is known.
+    ///
+    /// Every path that yields nothing records *why* in [`RawSources::notes`].
+    /// Provider errors used to be swallowed outright, which left a request that
+    /// ended with zero sources indistinguishable from one where every upstream
+    /// was simply out of results — the operator had no way to tell an unset key
+    /// from a rate-limited one.
     async fn fetch_raw_extra_sources(
         &self,
         query: &str,
         count: usize,
         filters: &SearchFilters,
-    ) -> (Vec<Source>, RawSourceOrigin) {
+    ) -> RawSources {
         if count == 0 {
-            return (Vec::new(), RawSourceOrigin::None);
+            return RawSources::empty(vec![
+                "source fan-out disabled (extra_sources and fallback_sources are both 0)"
+                    .to_string(),
+            ]);
         }
-        if let Some(provider) = &self.sources {
-            if let Ok(sources) = provider.search_sources(query, count, filters).await {
-                if !sources.is_empty() {
-                    return (sources, RawSourceOrigin::Primary);
+        let mut notes = Vec::new();
+        match &self.sources {
+            Some(provider) => match provider.search_sources(query, count, filters).await {
+                Ok(sources) if !sources.is_empty() => {
+                    return RawSources::found(sources, RawSourceOrigin::Primary)
                 }
-            }
+                Ok(_) => notes.push("tavily: no results".to_string()),
+                Err(err) => notes.push(format!("tavily: {err}")),
+            },
+            None => notes.push(format!(
+                "tavily: {}",
+                unavailable_note(
+                    self.config.tavily_enabled,
+                    "TAVILY_ENABLED",
+                    "TAVILY_API_KEY",
+                    "x-tavily-api-key",
+                )
+            )),
         }
         // The fallback source provider (Firecrawl) ignores `SearchFilters`
         // outright — it has no structured recency/domain support — so a
@@ -614,16 +625,32 @@ impl SearchService {
         // constrained Tavily results for unconstrained Firecrawl ones would
         // silently violate the include/exclude/recency contract. Constrained
         // requests are Tavily-or-nothing.
-        if filters.is_empty() {
-            if let Some(provider) = &self.fallback_sources {
-                if let Ok(sources) = provider.search_sources(query, count, filters).await {
-                    if !sources.is_empty() {
-                        return (sources, RawSourceOrigin::Fallback);
-                    }
-                }
-            }
+        if !filters.is_empty() {
+            notes.push(
+                "firecrawl: skipped (request carries domain/recency filters, which firecrawl cannot honor)"
+                    .to_string(),
+            );
+            return RawSources::empty(notes);
         }
-        (Vec::new(), RawSourceOrigin::None)
+        match &self.fallback_sources {
+            Some(provider) => match provider.search_sources(query, count, filters).await {
+                Ok(sources) if !sources.is_empty() => {
+                    return RawSources::found(sources, RawSourceOrigin::Fallback)
+                }
+                Ok(_) => notes.push("firecrawl: no results".to_string()),
+                Err(err) => notes.push(format!("firecrawl: {err}")),
+            },
+            None => notes.push(format!(
+                "firecrawl: {}",
+                unavailable_note(
+                    self.config.firecrawl_enabled,
+                    "FIRECRAWL_ENABLED",
+                    "FIRECRAWL_API_KEY",
+                    "x-firecrawl-api-key",
+                )
+            )),
+        }
+        RawSources::empty(notes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -632,14 +659,38 @@ impl SearchService {
         deadline: tokio::time::Instant,
         session_id: String,
         response: SearchResponse,
-        raw_sources: Vec<Source>,
-        raw_origin: RawSourceOrigin,
+        raw: RawSources,
         reason: &str,
         include_content: bool,
     ) -> Result<WebSearchOutput> {
-        let mut fallback = raw_sources;
+        let RawSources {
+            sources,
+            origin,
+            notes,
+        } = raw;
+
+        // A degraded response with zero sources carries no evidence *and* no
+        // answer — the original Grok text is deliberately not echoed on this
+        // path. Returning `Ok` here handed the caller a successful-looking
+        // empty result, which client models read as "the tool works, this
+        // query just missed" and answer by retrying the same dead path
+        // forever. Fail loudly instead, naming the upstream reason, what each
+        // source provider did, and that retrying is pointless.
+        if sources.is_empty() {
+            return Err(GrokSearchError::Provider(format!(
+                "web_search returned no sources: {reason}, and the source fallback produced nothing ({}). Retrying will not help until the Grok upstream or the source-provider credentials are fixed.",
+                source_diagnosis(&notes)
+            )));
+        }
+
+        let mut fallback = sources;
         fallback.truncate(self.config.fallback_sources);
-        let fallback = with_provider(fallback, fallback_label(raw_origin));
+        if fallback.is_empty() {
+            return Err(GrokSearchError::Provider(format!(
+                "web_search returned no sources: {reason}, and the fallback source budget is 0 (GROK_SEARCH_FALLBACK_SOURCES). Retrying will not help until that budget or the Grok upstream is fixed."
+            )));
+        }
+        let fallback = with_provider(fallback, fallback_label(origin));
 
         // D-03: the degraded path enriches eagerly — one-hand evidence is most
         // valuable when there is no verifiable summary, so there is no
@@ -961,6 +1012,60 @@ enum RawSourceOrigin {
     None,
     Primary,
     Fallback,
+}
+
+/// Outcome of the speculative source fan-out: the sources plus a per-provider
+/// account of what happened. `notes` stays empty on the happy path (a provider
+/// that returns results short-circuits before anything is recorded); it is
+/// populated only when a provider yields nothing, so a request that ends with
+/// zero sources can say why.
+struct RawSources {
+    sources: Vec<Source>,
+    origin: RawSourceOrigin,
+    notes: Vec<String>,
+}
+
+impl RawSources {
+    fn found(sources: Vec<Source>, origin: RawSourceOrigin) -> Self {
+        Self {
+            sources,
+            origin,
+            notes: Vec::new(),
+        }
+    }
+
+    fn empty(notes: Vec<String>) -> Self {
+        Self {
+            sources: Vec::new(),
+            origin: RawSourceOrigin::None,
+            notes,
+        }
+    }
+}
+
+/// One-line account of why no source provider produced anything, for the
+/// zero-source failure message. Carries provider error text (status codes,
+/// upstream detail) but never any credential: keys travel in headers, and the
+/// provider errors these notes wrap quote only the endpoint and response body.
+fn source_diagnosis(notes: &[String]) -> String {
+    if notes.is_empty() {
+        "no source provider was consulted".to_string()
+    } else {
+        notes.join("; ")
+    }
+}
+
+/// Why a source provider is absent from the service: the operator switched it
+/// off, or no key ever reached the process. The key hint names both channels
+/// because the HTTP transport ignores server-side env keys entirely — a
+/// self-hoster who set the key in their compose file needs to be told that the
+/// request header is the only one that counts there.
+fn unavailable_note(enabled: bool, enable_var: &str, key_var: &str, header: &str) -> String {
+    if enabled {
+        format!("no API key ({key_var} for stdio, {header} header for the HTTP transport)")
+    } else {
+        format!("disabled via {enable_var}")
+    }
 }
 
 /// Pick the model the active transport actually understands. Responses speaks
