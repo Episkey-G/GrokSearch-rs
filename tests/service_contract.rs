@@ -584,6 +584,41 @@ async fn web_search_error_names_the_disabled_fan_out_rather_than_credentials() {
     assert!(!message.contains("credentials"), "{message}");
 }
 
+// A zero fallback budget truncates the fan-out to nothing regardless of what
+// the providers returned, so no reformulated query can rescue this path. The
+// error has to say that instead of sending the caller off to rewrite a query
+// that provably cannot succeed.
+#[tokio::test]
+async fn web_search_error_names_a_zero_fallback_budget_even_when_providers_answered() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "3"),
+            ("GROK_SEARCH_FALLBACK_SOURCES", "0"),
+        ],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a zero budget leaves nothing to return");
+
+    let message = err.to_string();
+    assert!(message.contains("fallback source budget is 0"), "{message}");
+    assert!(message.contains("no change of query can help"), "{message}");
+    // What the providers saw is still worth reporting.
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(
+        !message.contains("a different query or looser filters"),
+        "{message}"
+    );
+}
+
 struct BlankUrlSourceProvider;
 
 #[async_trait]

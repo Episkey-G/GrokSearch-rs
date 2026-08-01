@@ -670,10 +670,6 @@ impl SearchService {
             origin,
             notes,
         } = raw;
-        // Distinguished before truncation: an operator who set the budget to 0
-        // needs a different message from one whose providers came back empty.
-        let budget_starved = !sources.is_empty() && self.config.fallback_sources == 0;
-
         let mut fallback = sources;
         fallback.truncate(self.config.fallback_sources);
         let fallback = with_provider(fallback, fallback_label(origin));
@@ -691,17 +687,33 @@ impl SearchService {
         // forever. Fail loudly instead, naming the upstream reason, what each
         // source provider did, and what would actually change the outcome.
         if fallback.is_empty() {
-            return Err(GrokSearchError::Provider(if budget_starved {
-                format!(
-                    "web_search returned no sources: {reason}, and the fallback source budget is 0 (GROK_SEARCH_FALLBACK_SOURCES). Raise that budget to get evidence on the degraded path."
-                )
-            } else {
-                format!(
-                    "web_search returned no sources: {reason}, and the source fallback produced nothing ({}). {}",
-                    source_diagnosis(&notes),
-                    fallback_remediation(&notes)
-                )
-            }));
+            // A zero budget truncates the fan-out to nothing whatever the
+            // providers returned, so it outranks every other account of the
+            // failure: no reformulated query can rescue this path while it
+            // holds. Testing the config directly rather than inferring it from
+            // an empty source list is what keeps that true when the providers
+            // also came back empty.
+            return Err(GrokSearchError::Provider(
+                if self.config.fallback_sources == 0 {
+                    // Providers that were consulted still get to say what they
+                    // saw; when the budget alone is at fault there are no notes
+                    // and nothing to append.
+                    let detail = if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", source_diagnosis(&notes))
+                    };
+                    format!(
+                        "web_search returned no sources: {reason}, and the fallback source budget is 0 (GROK_SEARCH_FALLBACK_SOURCES), so nothing from the source fan-out can survive{detail}. Raise that budget to get evidence on this path; no change of query can help while it is 0."
+                    )
+                } else {
+                    format!(
+                        "web_search returned no sources: {reason}, and the source fallback produced nothing ({}). {}",
+                        source_diagnosis(&notes),
+                        fallback_remediation(&notes)
+                    )
+                },
+            ));
         }
 
         // D-03: the degraded path enriches eagerly — one-hand evidence is most
