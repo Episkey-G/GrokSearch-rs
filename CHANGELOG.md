@@ -46,8 +46,16 @@ All notable changes to GrokSearch-rs are documented here.
   于是换个措辞重试,每次都走同一条死路径拿到同样的空壳成功,形成无限重试循环
   (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
   进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
-  以及「重试无用」的明确信号。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断为空的
-  情况单独给出自己的原因。兜底拿到来源时行为完全不变。
+  以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。三处 Codex 评审
+  采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
+  其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
+  静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
+  (2) provider 错误会原样引用上游响应体(可为任意大的 HTML 错误页),而这些
+  诊断现在走的是不受响应预算约束的错误通道,故每条 note 截断至 300 字符;
+  (3) provider 正常返回空结果(或因 filters 被有意跳过 Firecrawl)时,建议改为
+  「换 query 或放宽 filters」,不再一律说「修凭据/上游」——那种情况下换个查询
+  恰恰是唯一有用的动作。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。

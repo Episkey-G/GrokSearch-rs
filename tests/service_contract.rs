@@ -374,6 +374,171 @@ async fn web_search_still_succeeds_when_fallback_has_sources() {
 
     assert!(output.fallback_used);
     assert_eq!(output.sources_count, 2);
+    // Guards D-03's eager enrichment on the degraded path: nothing in the
+    // suite noticed when that block went missing, so pin it here.
+    assert!(
+        output.sources.iter().any(|source| source.content.is_some()),
+        "fallback path must still enrich inline content: {:?}",
+        output.sources
+    );
+}
+
+struct MetadataOnlyAiProvider;
+
+#[async_trait]
+impl AiProvider for MetadataOnlyAiProvider {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Ok(SearchResponse {
+            content: String::new(),
+            sources: vec![Source::new(
+                "https://grok.example/cited".to_string(),
+                "grok_responses",
+            )],
+        })
+    }
+}
+
+struct EmptyResultSourceProvider;
+
+#[async_trait]
+impl SourceProvider for EmptyResultSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+struct HugeErrorSourceProvider;
+
+#[async_trait]
+impl SourceProvider for HugeErrorSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        // What an intermediary answering with a full HTML error page looks like
+        // once the provider layer quotes the body verbatim.
+        Err(GrokSearchError::Provider(format!(
+            "Tavily returned HTTP 502: {}",
+            "x".repeat(20_000)
+        )))
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A metadata-only Grok response (citations, no prose) is a supported upstream
+// shape that routes through the degraded path as `grok_content_empty`. Those
+// citations are real evidence, so the zero-source guard must not fire on them
+// — and they must survive into the response rather than being dropped.
+#[tokio::test]
+async fn web_search_keeps_grok_citations_when_the_response_has_no_prose() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(MetadataOnlyAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("grok citations are evidence even with no prose");
+
+    assert!(output.fallback_used);
+    assert_eq!(
+        output.fallback_reason,
+        Some("grok_content_empty".to_string())
+    );
+    assert_eq!(output.sources_count, 1);
+    assert_eq!(output.sources[0].url, "https://grok.example/cited");
+    assert_eq!(output.sources[0].provider, "grok_responses");
+}
+
+// Providers that answered normally with nothing to show are not a broken
+// upstream: the query is the thing to change, so the error must not tell the
+// caller that retrying is futile until credentials are fixed.
+#[tokio::test]
+async fn web_search_error_tells_healthy_providers_to_change_the_query() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        Some(Arc::new(EmptyResultSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(message.contains("firecrawl: no results"), "{message}");
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+    assert!(!message.contains("credentials"), "{message}");
+}
+
+// Provider errors quote the upstream body verbatim, and these notes now travel
+// inside a tool error that no response budget applies to.
+#[tokio::test]
+async fn web_search_error_bounds_a_huge_provider_diagnostic() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(HugeErrorSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("zero sources still fails");
+
+    let message = err.to_string();
+    assert!(message.contains("Tavily returned HTTP 502"), "{message}");
+    assert!(
+        message.contains('…'),
+        "truncation marker missing: {message}"
+    );
+    assert!(
+        message.chars().count() < 1_000,
+        "diagnostic not bounded, got {} chars",
+        message.chars().count()
+    );
 }
 
 #[tokio::test]
