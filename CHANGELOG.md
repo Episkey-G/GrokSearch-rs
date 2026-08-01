@@ -47,7 +47,7 @@ All notable changes to GrokSearch-rs are documented here.
   (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
   进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
   以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
-  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。三处 Codex 评审
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。五处 Codex 评审
   采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
   其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
   静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
@@ -58,6 +58,14 @@ All notable changes to GrokSearch-rs are documented here.
   关掉(两个 budget 都为 0,或 `*_ENABLED` 关闭)说「开启 provider 或调大
   `GROK_SEARCH_FALLBACK_SOURCES`」;只有缺 key 或上游报错才说「修凭据/上游」。
   此前把「配置主动关掉」和「上游坏了」混为一类,会让运维去查根本没问题的凭据。
+  (4) 混合情形改为**组合**而非单选优先级:Tavily 正常返回空、Firecrawl 缺 key
+  时,换个 query 仍可能从 Tavily 拿到结果而无需动 Firecrawl 的凭据,故两条建议
+  同时给出;只有在**没有任何 provider 正常作答**时才附上「原样重试无用」这句
+  ——那正是打断死循环所需的信号。(5) `url` 为空串的结果不再算作 provider 成功:
+  两个 normalizer 都只拒绝缺失/非字符串的 `url`(空串照收),而 `merge_sources`
+  下游会把空 URL 全部丢弃,此前会导致 notes 连同"成功"一起被丢、最终错误消息
+  谎称「no source provider was consulted」。现在要求至少一条可用 URL,否则记为
+  「results carried no usable URLs」。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。

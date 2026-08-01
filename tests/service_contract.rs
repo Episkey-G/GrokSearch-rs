@@ -322,7 +322,17 @@ async fn web_search_errors_when_grok_and_every_source_provider_fail() {
     // deployment ignores the server-side env key outright.
     assert!(message.contains("firecrawl: no API key"), "{message}");
     assert!(message.contains("x-firecrawl-api-key"), "{message}");
-    assert!(message.contains("Retrying will not help"), "{message}");
+    assert!(
+        message.contains("credentials or upstream are fixed"),
+        "{message}"
+    );
+    // Nothing answered normally here, so the do-not-just-retry signal — the
+    // whole point of failing instead of returning an empty success — must be
+    // present.
+    assert!(
+        message.contains("Repeating this query unchanged will not help"),
+        "{message}"
+    );
 }
 
 // Filter-constrained requests are Tavily-or-nothing by design (Firecrawl
@@ -572,6 +582,100 @@ async fn web_search_error_names_the_disabled_fan_out_rather_than_credentials() {
         "{message}"
     );
     assert!(!message.contains("credentials"), "{message}");
+}
+
+struct BlankUrlSourceProvider;
+
+#[async_trait]
+impl SourceProvider for BlankUrlSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        // Both normalizers accept an entry whose `url` is an empty string.
+        Ok(vec![Source::new(String::new(), "tavily")])
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A provider whose results carry no usable URL has not really answered:
+// `merge_sources` drops those entries downstream. Counting it as a success
+// would discard the notes and leave the failure claiming nothing was ever
+// consulted, which is the opposite of what happened.
+#[tokio::test]
+async fn web_search_error_names_a_provider_that_returned_unusable_urls() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(BlankUrlSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("blank URLs leave nothing to return");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("tavily: results carried no usable URLs"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("no source provider was consulted"),
+        "{message}"
+    );
+}
+
+// Mixed outcome: Tavily answered normally with no matches while Firecrawl has
+// no key. A different query can still succeed through Tavily without anyone
+// touching Firecrawl's credentials, so both remedies have to survive.
+#[tokio::test]
+async fn web_search_error_keeps_query_advice_when_only_one_provider_is_broken() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+    assert!(
+        message.contains("credentials or upstream are fixed"),
+        "{message}"
+    );
+    // Tavily is alive, so a reformulated query is a legitimate next move and
+    // must not be ruled out.
+    assert!(
+        !message.contains("Repeating this query unchanged"),
+        "{message}"
+    );
 }
 
 #[tokio::test]

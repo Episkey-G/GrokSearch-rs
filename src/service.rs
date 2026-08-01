@@ -602,10 +602,13 @@ impl SearchService {
         let mut notes = Vec::new();
         match &self.sources {
             Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) if !sources.is_empty() => {
+                Ok(sources) if has_usable_url(&sources) => {
                     return RawSources::found(sources, RawSourceOrigin::Primary)
                 }
-                Ok(_) => notes.push(SourceNote::no_results("tavily: no results")),
+                Ok(sources) if sources.is_empty() => {
+                    notes.push(SourceNote::no_results("tavily: no results"))
+                }
+                Ok(_) => notes.push(SourceNote::broken("tavily: results carried no usable URLs")),
                 Err(err) => notes.push(SourceNote::broken(format!("tavily: {err}"))),
             },
             None => notes.push(unavailable_note(
@@ -630,10 +633,15 @@ impl SearchService {
         }
         match &self.fallback_sources {
             Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) if !sources.is_empty() => {
+                Ok(sources) if has_usable_url(&sources) => {
                     return RawSources::found(sources, RawSourceOrigin::Fallback)
                 }
-                Ok(_) => notes.push(SourceNote::no_results("firecrawl: no results")),
+                Ok(sources) if sources.is_empty() => {
+                    notes.push(SourceNote::no_results("firecrawl: no results"))
+                }
+                Ok(_) => notes.push(SourceNote::broken(
+                    "firecrawl: results carried no usable URLs",
+                )),
                 Err(err) => notes.push(SourceNote::broken(format!("firecrawl: {err}"))),
             },
             None => notes.push(unavailable_note(
@@ -1128,20 +1136,42 @@ fn source_diagnosis(notes: &[SourceNote]) -> String {
     }
 }
 
-/// What would actually change the outcome, picked from the most actionable
-/// note present: something genuinely broken outranks a configuration gate,
-/// which outranks an honest empty result. Telling a caller with a healthy but
-/// empty result set to go fix credentials would rule out the one move that
-/// works — and so would telling an operator who switched the fan-out off that
-/// their upstream is at fault.
-fn fallback_remediation(notes: &[SourceNote]) -> &'static str {
-    if notes.is_empty() || notes.iter().any(|note| note.kind == NoteKind::Broken) {
-        return "Retrying will not help until the Grok upstream or the source-provider credentials are fixed.";
+/// Whether a provider's answer contains anything the rest of the pipeline can
+/// use. Both normalizers accept an entry whose `url` is an empty string, and
+/// `merge_sources` drops those later — so counting such an answer as a success
+/// here would throw away the notes and leave the zero-source failure claiming
+/// no provider was ever consulted.
+fn has_usable_url(sources: &[Source]) -> bool {
+    sources.iter().any(|source| !source.url.trim().is_empty())
+}
+
+/// What would actually change the outcome, composed from every kind of dead
+/// end present rather than one chosen by precedence. Mixed outcomes are the
+/// common case — Tavily answering normally with no matches while Firecrawl has
+/// no key — and there a different query can still succeed through the healthy
+/// provider without anyone touching the other one's credentials. Suppressing
+/// that advice would rule out the move that works; equally, the "do not just
+/// repeat this" signal has to survive whenever nothing answered normally,
+/// since that is what a client model needs to stop retrying a dead path.
+fn fallback_remediation(notes: &[SourceNote]) -> String {
+    if notes.is_empty() {
+        return "Retrying will not help until the Grok upstream or the source-provider credentials are fixed.".to_string();
     }
-    if notes.iter().any(|note| note.kind == NoteKind::Config) {
-        return "No source provider was available to consult; enable one (TAVILY_ENABLED / FIRECRAWL_ENABLED) or raise GROK_SEARCH_FALLBACK_SOURCES to get evidence on this path.";
+    let has = |kind: NoteKind| notes.iter().any(|note| note.kind == kind);
+    let mut parts = Vec::new();
+    if has(NoteKind::NoResults) {
+        parts.push("A source provider answered normally with no matches, so a different query or looser filters may help.");
     }
-    "The source providers answered normally with no matches, so a different query or looser filters may help; repeating this one will not."
+    if has(NoteKind::Config) {
+        parts.push("A source provider is switched off; enable it (TAVILY_ENABLED / FIRECRAWL_ENABLED) or raise GROK_SEARCH_FALLBACK_SOURCES.");
+    }
+    if has(NoteKind::Broken) {
+        parts.push("A source provider is unusable until its credentials or upstream are fixed.");
+    }
+    if !has(NoteKind::NoResults) {
+        parts.push("Repeating this query unchanged will not help.");
+    }
+    parts.join(" ")
 }
 
 /// Why a source provider is absent from the service: the operator switched it
