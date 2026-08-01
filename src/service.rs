@@ -595,7 +595,7 @@ impl SearchService {
         filters: &SearchFilters,
     ) -> RawSources {
         if count == 0 {
-            return RawSources::empty(vec![SourceNote::faulty(
+            return RawSources::empty(vec![SourceNote::config(
                 "source fan-out disabled (extra_sources and fallback_sources are both 0)",
             )]);
         }
@@ -605,18 +605,16 @@ impl SearchService {
                 Ok(sources) if !sources.is_empty() => {
                     return RawSources::found(sources, RawSourceOrigin::Primary)
                 }
-                Ok(_) => notes.push(SourceNote::healthy("tavily: no results")),
-                Err(err) => notes.push(SourceNote::faulty(format!("tavily: {err}"))),
+                Ok(_) => notes.push(SourceNote::no_results("tavily: no results")),
+                Err(err) => notes.push(SourceNote::broken(format!("tavily: {err}"))),
             },
-            None => notes.push(SourceNote::faulty(format!(
-                "tavily: {}",
-                unavailable_note(
-                    self.config.tavily_enabled,
-                    "TAVILY_ENABLED",
-                    "TAVILY_API_KEY",
-                    "x-tavily-api-key",
-                )
-            ))),
+            None => notes.push(unavailable_note(
+                "tavily",
+                self.config.tavily_enabled,
+                "TAVILY_ENABLED",
+                "TAVILY_API_KEY",
+                "x-tavily-api-key",
+            )),
         }
         // The fallback source provider (Firecrawl) ignores `SearchFilters`
         // outright — it has no structured recency/domain support — so a
@@ -625,7 +623,7 @@ impl SearchService {
         // silently violate the include/exclude/recency contract. Constrained
         // requests are Tavily-or-nothing.
         if !filters.is_empty() {
-            notes.push(SourceNote::healthy(
+            notes.push(SourceNote::no_results(
                 "firecrawl: skipped (request carries domain/recency filters, which firecrawl cannot honor)",
             ));
             return RawSources::empty(notes);
@@ -635,18 +633,16 @@ impl SearchService {
                 Ok(sources) if !sources.is_empty() => {
                     return RawSources::found(sources, RawSourceOrigin::Fallback)
                 }
-                Ok(_) => notes.push(SourceNote::healthy("firecrawl: no results")),
-                Err(err) => notes.push(SourceNote::faulty(format!("firecrawl: {err}"))),
+                Ok(_) => notes.push(SourceNote::no_results("firecrawl: no results")),
+                Err(err) => notes.push(SourceNote::broken(format!("firecrawl: {err}"))),
             },
-            None => notes.push(SourceNote::faulty(format!(
-                "firecrawl: {}",
-                unavailable_note(
-                    self.config.firecrawl_enabled,
-                    "FIRECRAWL_ENABLED",
-                    "FIRECRAWL_API_KEY",
-                    "x-firecrawl-api-key",
-                )
-            ))),
+            None => notes.push(unavailable_note(
+                "firecrawl",
+                self.config.firecrawl_enabled,
+                "FIRECRAWL_ENABLED",
+                "FIRECRAWL_API_KEY",
+                "x-firecrawl-api-key",
+            )),
         }
         RawSources::empty(notes)
     }
@@ -1057,29 +1053,48 @@ impl RawSources {
 /// so each one is capped where it is recorded.
 const MAX_SOURCE_NOTE_CHARS: usize = 300;
 
+/// What kind of dead end a provider hit, which is what decides the useful
+/// remedy. Collapsing these into "did it work" would hand every failure the
+/// same advice, and the advice differs sharply: a deliberately disabled
+/// fan-out is not a broken upstream, and neither is an honest empty result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteKind {
+    /// The provider answered normally and simply had no matches, or was
+    /// deliberately skipped by the filter gate. The query is the thing to
+    /// change.
+    NoResults,
+    /// The operator switched this path off — a disabled provider, or a source
+    /// budget of zero. Nothing is broken; the configuration says no.
+    Config,
+    /// A missing credential or an upstream failure. Something has to be fixed
+    /// before this path can work at all.
+    Broken,
+}
+
 /// One provider's account of why it produced nothing.
 struct SourceNote {
-    /// The provider answered normally and simply had no matches, or was
-    /// deliberately skipped by the filter gate. Kept apart from a missing key,
-    /// a disabled provider, or an upstream error because the useful
-    /// remediation differs: change the query, not the credentials.
-    healthy: bool,
+    kind: NoteKind,
     detail: String,
 }
 
 impl SourceNote {
-    fn healthy(detail: impl Into<String>) -> Self {
+    fn new(kind: NoteKind, detail: impl Into<String>) -> Self {
         Self {
-            healthy: true,
+            kind,
             detail: truncate_note(detail.into()),
         }
     }
 
-    fn faulty(detail: impl Into<String>) -> Self {
-        Self {
-            healthy: false,
-            detail: truncate_note(detail.into()),
-        }
+    fn no_results(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::NoResults, detail)
+    }
+
+    fn config(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::Config, detail)
+    }
+
+    fn broken(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::Broken, detail)
     }
 }
 
@@ -1113,28 +1128,41 @@ fn source_diagnosis(notes: &[SourceNote]) -> String {
     }
 }
 
-/// What would actually change the outcome. Providers that answered normally
-/// with nothing to show are not a broken upstream: there the query or the
-/// filters are the thing to change, and telling the caller that retrying
-/// cannot help would rule out the one move that works.
+/// What would actually change the outcome, picked from the most actionable
+/// note present: something genuinely broken outranks a configuration gate,
+/// which outranks an honest empty result. Telling a caller with a healthy but
+/// empty result set to go fix credentials would rule out the one move that
+/// works — and so would telling an operator who switched the fan-out off that
+/// their upstream is at fault.
 fn fallback_remediation(notes: &[SourceNote]) -> &'static str {
-    if !notes.is_empty() && notes.iter().all(|note| note.healthy) {
-        "The source providers answered normally with no matches, so a different query or looser filters may help; repeating this one will not."
-    } else {
-        "Retrying will not help until the Grok upstream or the source-provider credentials are fixed."
+    if notes.is_empty() || notes.iter().any(|note| note.kind == NoteKind::Broken) {
+        return "Retrying will not help until the Grok upstream or the source-provider credentials are fixed.";
     }
+    if notes.iter().any(|note| note.kind == NoteKind::Config) {
+        return "No source provider was available to consult; enable one (TAVILY_ENABLED / FIRECRAWL_ENABLED) or raise GROK_SEARCH_FALLBACK_SOURCES to get evidence on this path.";
+    }
+    "The source providers answered normally with no matches, so a different query or looser filters may help; repeating this one will not."
 }
 
 /// Why a source provider is absent from the service: the operator switched it
-/// off, or no key ever reached the process. The key hint names both channels
-/// because the HTTP transport ignores server-side env keys entirely — a
-/// self-hoster who set the key in their compose file needs to be told that the
-/// request header is the only one that counts there.
-fn unavailable_note(enabled: bool, enable_var: &str, key_var: &str, header: &str) -> String {
+/// off (a configuration choice), or no key ever reached the process (something
+/// to fix). The key hint names both channels because the HTTP transport
+/// ignores server-side env keys entirely — a self-hoster who set the key in
+/// their compose file needs to be told that the request header is the only one
+/// that counts there.
+fn unavailable_note(
+    provider: &str,
+    enabled: bool,
+    enable_var: &str,
+    key_var: &str,
+    header: &str,
+) -> SourceNote {
     if enabled {
-        format!("no API key ({key_var} for stdio, {header} header for the HTTP transport)")
+        SourceNote::broken(format!(
+            "{provider}: no API key ({key_var} for stdio, {header} header for the HTTP transport)"
+        ))
     } else {
-        format!("disabled via {enable_var}")
+        SourceNote::config(format!("{provider}: disabled via {enable_var}"))
     }
 }
 

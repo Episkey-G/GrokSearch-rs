@@ -53,9 +53,11 @@ All notable changes to GrokSearch-rs are documented here.
   静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
   (2) provider 错误会原样引用上游响应体(可为任意大的 HTML 错误页),而这些
   诊断现在走的是不受响应预算约束的错误通道,故每条 note 截断至 300 字符;
-  (3) provider 正常返回空结果(或因 filters 被有意跳过 Firecrawl)时,建议改为
-  「换 query 或放宽 filters」,不再一律说「修凭据/上游」——那种情况下换个查询
-  恰恰是唯一有用的动作。
+  (3) 补救建议按 note 三态给出而非一刀切——provider 正常返回空结果(或因
+  filters 被有意跳过 Firecrawl)说「换 query 或放宽 filters」;fan-out 被配置
+  关掉(两个 budget 都为 0,或 `*_ENABLED` 关闭)说「开启 provider 或调大
+  `GROK_SEARCH_FALLBACK_SOURCES`」;只有缺 key 或上游报错才说「修凭据/上游」。
+  此前把「配置主动关掉」和「上游坏了」混为一类,会让运维去查根本没问题的凭据。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。

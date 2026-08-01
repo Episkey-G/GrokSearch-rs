@@ -541,6 +541,39 @@ async fn web_search_error_bounds_a_huge_provider_diagnostic() {
     );
 }
 
+// Both source budgets at 0 disables the fan-out entirely: no provider is ever
+// consulted, so nothing is broken and no credential is missing. Raising the
+// budget is the remedy, and the error has to say that rather than sending the
+// operator off to check keys.
+#[tokio::test]
+async fn web_search_error_names_the_disabled_fan_out_rather_than_credentials() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(CountingSourceProvider::default()),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "0"),
+            ("GROK_SEARCH_FALLBACK_SOURCES", "0"),
+        ],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("source fan-out disabled"), "{message}");
+    assert!(
+        message.contains("GROK_SEARCH_FALLBACK_SOURCES"),
+        "{message}"
+    );
+    assert!(!message.contains("credentials"), "{message}");
+}
+
 #[tokio::test]
 async fn fallback_honors_include_content_false() {
     // include_content=false is an explicit opt-out and must suppress inline
