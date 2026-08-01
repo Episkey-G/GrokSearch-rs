@@ -626,9 +626,31 @@ impl SearchService {
         // silently violate the include/exclude/recency contract. Constrained
         // requests are Tavily-or-nothing.
         if !filters.is_empty() {
-            notes.push(SourceNote::no_results(
-                "firecrawl: skipped (request carries domain/recency filters, which firecrawl cannot honor)",
-            ));
+            const SKIPPED: &str =
+                "skipped (request carries domain/recency filters, which firecrawl cannot honor)";
+            // Whether the gate is the *only* thing in the way decides what to
+            // advise. A configured Firecrawl really would have answered, so
+            // dropping the filters is a genuine remedy and this is an honest
+            // empty outcome. An absent one changes nothing when the filters go,
+            // so recording that as a healthy no-match would promise a remedy
+            // that cannot work — while hiding the configuration problem behind
+            // it.
+            notes.push(match &self.fallback_sources {
+                Some(_) => SourceNote::no_results(format!("firecrawl: {SKIPPED}")),
+                None => {
+                    let unavailable = unavailable_note(
+                        "firecrawl",
+                        self.config.firecrawl_enabled,
+                        "FIRECRAWL_ENABLED",
+                        "FIRECRAWL_API_KEY",
+                        "x-firecrawl-api-key",
+                    );
+                    SourceNote::new(
+                        unavailable.kind,
+                        format!("{} — also {SKIPPED}", unavailable.detail),
+                    )
+                }
+            });
             return RawSources::empty(notes);
         }
         match &self.fallback_sources {

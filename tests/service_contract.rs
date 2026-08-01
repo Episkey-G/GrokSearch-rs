@@ -361,6 +361,44 @@ async fn web_search_error_names_the_filter_gate_that_skipped_firecrawl() {
     assert!(message.contains("grok_sources_empty"), "{message}");
     assert!(message.contains("firecrawl: skipped"), "{message}");
     assert!(message.contains("filters"), "{message}");
+    // Firecrawl is configured here, so dropping the filters really would reach
+    // it — the remedy is honest.
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+}
+
+// The filter gate only justifies "loosen the filters" when there is a Firecrawl
+// on the other side of it. With none configured, dropping the filters reaches
+// nothing, so the note must carry the configuration problem instead of reading
+// as an honest empty result.
+#[tokio::test]
+async fn web_search_error_does_not_blame_filters_when_firecrawl_is_absent() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_domains: vec!["example.com".to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect_err("filter-gated fallback with no firecrawl must fail");
+
+    let message = err.to_string();
+    // Both facts survive: the gate skipped it, and it was not there anyway.
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(message.contains("also skipped"), "{message}");
+    assert!(
+        !message.contains("a different query or looser filters"),
+        "{message}"
+    );
 }
 
 // The zero-source guard must stay off the degraded-but-useful path: a fallback
