@@ -328,9 +328,9 @@ async fn web_search_errors_when_grok_and_every_source_provider_fail() {
     );
     // Nothing answered normally here, so the do-not-just-retry signal — the
     // whole point of failing instead of returning an empty success — must be
-    // present.
+    // present, without overclaiming that a repeat can never work.
     assert!(
-        message.contains("Repeating this query unchanged will not help"),
+        message.contains("Repeating this query unchanged will fail the same way"),
         "{message}"
     );
 }

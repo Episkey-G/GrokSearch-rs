@@ -47,7 +47,7 @@ All notable changes to GrokSearch-rs are documented here.
   (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
   进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
   以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
-  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。六处 Codex 评审
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。八处 Codex 评审
   采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
   其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
   静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
@@ -69,7 +69,13 @@ All notable changes to GrokSearch-rs are documented here.
   配置,不再附加「provider 曾返回过结果」这个条件:`extra_sources` 非 0 时 fan-out
   照跑,provider 返回空则原本会掩盖掉真正的原因、转而建议「换 query」——可
   `truncate(0)` 会把任何结果清空,那条建议在该配置下**永远**不可能奏效。现在
-  budget 为 0 时一律优先报告它,同时保留 provider 的诊断。
+  budget 为 0 时一律优先报告它,同时保留 provider 的诊断。(7) 承 (6) 之后,能走到
+  `fallback_remediation` 的 `Config` note 只剩「provider 被 `*_ENABLED` 关掉」
+  一种(fan-out disabled 必然伴随 budget=0,已被前置分支拦截),而调大 budget
+  并不能把关掉的 provider 变出来,故该建议里去掉这半句。(8)「原样重试无用」
+  改为「原样重试会以同样方式失败,直到上述状况解除」:Grok 超时/5xx 会自行恢复,
+  绝对化的断言不成立;但对正在死循环的客户端模型,「此刻重试不会有变化」这个
+  信号必须保留——这正是本次修复的目的。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。

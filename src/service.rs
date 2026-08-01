@@ -1175,13 +1175,24 @@ fn fallback_remediation(notes: &[SourceNote]) -> String {
         parts.push("A source provider answered normally with no matches, so a different query or looser filters may help.");
     }
     if has(NoteKind::Config) {
-        parts.push("A source provider is switched off; enable it (TAVILY_ENABLED / FIRECRAWL_ENABLED) or raise GROK_SEARCH_FALLBACK_SOURCES.");
+        // Only a provider disabled through its own switch reaches this far: the
+        // other producer of `Config` is the zero fan-out, which cannot happen
+        // without a zero fallback budget, and `finalize_fallback` reports that
+        // before asking for a remediation. Raising the budget would not
+        // instantiate a switched-off provider, so it is not offered here.
+        parts.push(
+            "A source provider is switched off; enable it (TAVILY_ENABLED / FIRECRAWL_ENABLED).",
+        );
     }
     if has(NoteKind::Broken) {
         parts.push("A source provider is unusable until its credentials or upstream are fixed.");
     }
     if !has(NoteKind::NoResults) {
-        parts.push("Repeating this query unchanged will not help.");
+        // Deliberately not an absolute claim. A Grok timeout or 5xx clears on
+        // its own, and an unchanged retry does succeed once it does — but not
+        // before, which is what a client model looping on the same dead path
+        // needs to hear.
+        parts.push("Repeating this query unchanged will fail the same way until the condition above clears.");
     }
     parts.join(" ")
 }
@@ -1205,6 +1216,65 @@ fn unavailable_note(
         ))
     } else {
         SourceNote::config(format!("{provider}: disabled via {enable_var}"))
+    }
+}
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+
+    // A switched-off provider is the only `Config` note that can reach the
+    // remediation — the zero fan-out is reported by `finalize_fallback` before
+    // this runs — and raising the source budget cannot instantiate one, so that
+    // advice must not appear.
+    #[test]
+    fn disabled_provider_is_told_to_enable_not_to_raise_the_budget() {
+        let notes = vec![unavailable_note(
+            "tavily",
+            false,
+            "TAVILY_ENABLED",
+            "TAVILY_API_KEY",
+            "x-tavily-api-key",
+        )];
+        let remediation = fallback_remediation(&notes);
+        assert!(remediation.contains("TAVILY_ENABLED"), "{remediation}");
+        assert!(
+            !remediation.contains("GROK_SEARCH_FALLBACK_SOURCES"),
+            "{remediation}"
+        );
+    }
+
+    // A Grok timeout or 5xx clears on its own, so the no-retry line must stop
+    // short of claiming a repeat can never work — while still telling a looping
+    // client that repeating it *now* changes nothing.
+    #[test]
+    fn retry_guidance_is_conditional_not_absolute() {
+        let notes = vec![SourceNote::broken("tavily: provider error: HTTP 500")];
+        let remediation = fallback_remediation(&notes);
+        assert!(
+            remediation.contains("until the condition above clears"),
+            "{remediation}"
+        );
+        assert!(!remediation.contains("will not help"), "{remediation}");
+    }
+
+    // A provider that answered normally leaves a reformulated query on the
+    // table, so the no-retry line stays out of the way entirely.
+    #[test]
+    fn a_healthy_empty_result_keeps_the_retry_door_open() {
+        let notes = vec![
+            SourceNote::no_results("tavily: no results"),
+            SourceNote::broken("firecrawl: no API key"),
+        ];
+        let remediation = fallback_remediation(&notes);
+        assert!(
+            remediation.contains("a different query or looser filters"),
+            "{remediation}"
+        );
+        assert!(
+            !remediation.contains("Repeating this query unchanged"),
+            "{remediation}"
+        );
     }
 }
 
