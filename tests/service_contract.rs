@@ -657,6 +657,57 @@ async fn web_search_error_names_a_zero_fallback_budget_even_when_providers_answe
     );
 }
 
+struct BlankThenValidSourceProvider;
+
+#[async_trait]
+impl SourceProvider for BlankThenValidSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(vec![
+            Source::new(String::new(), "tavily"),
+            Source::new("https://example.com/valid".to_string(), "tavily"),
+        ])
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A blank URL ahead of a real one must not consume the source budget: the
+// budget is applied before `merge_sources` drops blanks, so keeping it would
+// discard the only usable evidence and fail a request that had some.
+#[tokio::test]
+async fn web_search_fallback_keeps_valid_sources_behind_a_blank_url() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(BlankThenValidSourceProvider),
+        None,
+        [("GROK_SEARCH_FALLBACK_SOURCES", "1")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("a usable source behind a blank one is still evidence");
+
+    assert!(output.fallback_used);
+    assert_eq!(output.sources_count, 1);
+    assert_eq!(output.sources[0].url, "https://example.com/valid");
+}
+
 struct BlankUrlSourceProvider;
 
 #[async_trait]

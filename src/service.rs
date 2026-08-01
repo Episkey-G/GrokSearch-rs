@@ -602,13 +602,10 @@ impl SearchService {
         let mut notes = Vec::new();
         match &self.sources {
             Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) if has_usable_url(&sources) => {
-                    return RawSources::found(sources, RawSourceOrigin::Primary)
-                }
-                Ok(sources) if sources.is_empty() => {
-                    notes.push(SourceNote::no_results("tavily: no results"))
-                }
-                Ok(_) => notes.push(SourceNote::broken("tavily: results carried no usable URLs")),
+                Ok(sources) => match usable_or_note("tavily", sources) {
+                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Primary),
+                    Err(note) => notes.push(note),
+                },
                 Err(err) => notes.push(SourceNote::broken(format!("tavily: {err}"))),
             },
             None => notes.push(unavailable_note(
@@ -655,15 +652,10 @@ impl SearchService {
         }
         match &self.fallback_sources {
             Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) if has_usable_url(&sources) => {
-                    return RawSources::found(sources, RawSourceOrigin::Fallback)
-                }
-                Ok(sources) if sources.is_empty() => {
-                    notes.push(SourceNote::no_results("firecrawl: no results"))
-                }
-                Ok(_) => notes.push(SourceNote::broken(
-                    "firecrawl: results carried no usable URLs",
-                )),
+                Ok(sources) => match usable_or_note("firecrawl", sources) {
+                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Fallback),
+                    Err(note) => notes.push(note),
+                },
                 Err(err) => notes.push(SourceNote::broken(format!("firecrawl: {err}"))),
             },
             None => notes.push(unavailable_note(
@@ -1170,13 +1162,36 @@ fn source_diagnosis(notes: &[SourceNote]) -> String {
     }
 }
 
-/// Whether a provider's answer contains anything the rest of the pipeline can
-/// use. Both normalizers accept an entry whose `url` is an empty string, and
-/// `merge_sources` drops those later — so counting such an answer as a success
-/// here would throw away the notes and leave the zero-source failure claiming
-/// no provider was ever consulted.
-fn has_usable_url(sources: &[Source]) -> bool {
-    sources.iter().any(|source| !source.url.trim().is_empty())
+/// Keep only what the rest of the pipeline can act on, or explain what the
+/// provider did instead.
+///
+/// Both normalizers accept an entry whose `url` is an empty string, and
+/// `merge_sources` discards those — but only far downstream, after the caller
+/// has already truncated to its source budget. Left in place, a blank entry
+/// consumes a budget slot and silently displaces real evidence: a budget of 1
+/// against `[blank, valid]` used to keep the blank, drop the valid source in
+/// `merge_sources`, and fail the whole request. Filtering here means truncation
+/// only ever applies to sources that will survive.
+fn usable_or_note(
+    provider: &str,
+    sources: Vec<Source>,
+) -> std::result::Result<Vec<Source>, SourceNote> {
+    let returned = sources.len();
+    let usable: Vec<Source> = sources
+        .into_iter()
+        .filter(|source| !source.url.trim().is_empty())
+        .collect();
+    if !usable.is_empty() {
+        return Ok(usable);
+    }
+    // An empty answer is an honest no-match; an answer made entirely of blanks
+    // is a provider returning something unusable, which is a different problem
+    // with a different remedy.
+    Err(if returned == 0 {
+        SourceNote::no_results(format!("{provider}: no results"))
+    } else {
+        SourceNote::broken(format!("{provider}: results carried no usable URLs"))
+    })
 }
 
 /// What would actually change the outcome, composed from every kind of dead

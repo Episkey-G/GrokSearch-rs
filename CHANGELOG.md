@@ -47,7 +47,7 @@ All notable changes to GrokSearch-rs are documented here.
   (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
   进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
   以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
-  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。九处 Codex 评审
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。十处 Codex 评审
   采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
   其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
   静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
@@ -79,6 +79,11 @@ All notable changes to GrokSearch-rs are documented here.
   无条件记为「正常空结果」:只有 Firecrawl 确实配好时,「放宽 filters」才是真能
   奏效的补救;若 Firecrawl 本就没配或被关掉,放宽 filters 也够不到任何 provider,
   此时改记为对应的不可用 note(两条事实都保留:被 filters 跳过 + 本来也不可用)。
+  (10) 空 URL 改为**过滤**而非仅**判定**:此前 `[空, 有效]` 这样的结果会整体
+  通过判定,随后 `truncate(budget)` 先执行、`merge_sources` 丢空 URL 后执行——
+  budget=1 时那条有效来源会被空条目挤掉,整个请求以硬错误告终(enrichment 主
+  路径同理,该问题早于本 PR 存在)。现在在构造 `RawSources::found` 前就滤掉空
+  URL,截断只作用于确定能存活的来源。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。
