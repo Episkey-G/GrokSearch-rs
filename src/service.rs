@@ -494,8 +494,7 @@ impl SearchService {
         let grok_future = self.ai.search(&request);
         let speculative_future =
             self.fetch_raw_extra_sources(&input.query, speculative_count, &filters);
-        let (grok_result, (raw_sources, raw_origin)) =
-            tokio::join!(grok_future, speculative_future);
+        let (grok_result, raw) = tokio::join!(grok_future, speculative_future);
 
         let response = match grok_result {
             Ok(response) => response,
@@ -508,8 +507,7 @@ impl SearchService {
                             content: String::new(),
                             sources: Vec::new(),
                         },
-                        raw_sources,
-                        raw_origin,
+                        raw,
                         grok_error_reason(&err),
                         include_content,
                     )
@@ -519,21 +517,13 @@ impl SearchService {
 
         if let Some(reason) = grok_unverifiable_reason(&response) {
             return self
-                .finalize_fallback(
-                    deadline,
-                    session_id,
-                    response,
-                    raw_sources,
-                    raw_origin,
-                    reason,
-                    include_content,
-                )
+                .finalize_fallback(deadline, session_id, response, raw, reason, include_content)
                 .await;
         }
 
-        let mut enrichment = raw_sources;
+        let mut enrichment = raw.sources;
         enrichment.truncate(effective_extra_sources);
-        let enrichment = with_provider(enrichment, enrichment_label(raw_origin));
+        let enrichment = with_provider(enrichment, enrichment_label(raw.origin));
         let merged = merge_sources(response.sources, enrichment);
         // SRCH-04 dual gate (zero-regression): skip enrichment when the caller
         // opted out OR there are no supplemental sources. Gating on
@@ -592,21 +582,39 @@ impl SearchService {
     /// returned Vec carries each provider's native label ("tavily"/"firecrawl");
     /// the caller re-labels via `with_provider` once the path (enrichment vs
     /// fallback) is known.
+    ///
+    /// Every path that yields nothing records *why* in [`RawSources::notes`].
+    /// Provider errors used to be swallowed outright, which left a request that
+    /// ended with zero sources indistinguishable from one where every upstream
+    /// was simply out of results — the operator had no way to tell an unset key
+    /// from a rate-limited one.
     async fn fetch_raw_extra_sources(
         &self,
         query: &str,
         count: usize,
         filters: &SearchFilters,
-    ) -> (Vec<Source>, RawSourceOrigin) {
+    ) -> RawSources {
         if count == 0 {
-            return (Vec::new(), RawSourceOrigin::None);
+            return RawSources::empty(vec![SourceNote::config(
+                "source fan-out disabled (extra_sources and fallback_sources are both 0)",
+            )]);
         }
-        if let Some(provider) = &self.sources {
-            if let Ok(sources) = provider.search_sources(query, count, filters).await {
-                if !sources.is_empty() {
-                    return (sources, RawSourceOrigin::Primary);
-                }
-            }
+        let mut notes = Vec::new();
+        match &self.sources {
+            Some(provider) => match provider.search_sources(query, count, filters).await {
+                Ok(sources) => match usable_or_note("tavily", sources) {
+                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Primary),
+                    Err(note) => notes.push(note),
+                },
+                Err(err) => notes.push(SourceNote::broken(format!("tavily: {err}"))),
+            },
+            None => notes.push(unavailable_note(
+                "tavily",
+                self.config.tavily_enabled,
+                "TAVILY_ENABLED",
+                "TAVILY_API_KEY",
+                "x-tavily-api-key",
+            )),
         }
         // The fallback source provider (Firecrawl) ignores `SearchFilters`
         // outright — it has no structured recency/domain support — so a
@@ -614,16 +622,51 @@ impl SearchService {
         // constrained Tavily results for unconstrained Firecrawl ones would
         // silently violate the include/exclude/recency contract. Constrained
         // requests are Tavily-or-nothing.
-        if filters.is_empty() {
-            if let Some(provider) = &self.fallback_sources {
-                if let Ok(sources) = provider.search_sources(query, count, filters).await {
-                    if !sources.is_empty() {
-                        return (sources, RawSourceOrigin::Fallback);
-                    }
+        if !filters.is_empty() {
+            const SKIPPED: &str =
+                "skipped (request carries domain/recency filters, which firecrawl cannot honor)";
+            // Whether the gate is the *only* thing in the way decides what to
+            // advise. A configured Firecrawl really would have answered, so
+            // dropping the filters is a genuine remedy and this is an honest
+            // empty outcome. An absent one changes nothing when the filters go,
+            // so recording that as a healthy no-match would promise a remedy
+            // that cannot work — while hiding the configuration problem behind
+            // it.
+            notes.push(match &self.fallback_sources {
+                Some(_) => SourceNote::no_results(format!("firecrawl: {SKIPPED}")),
+                None => {
+                    let unavailable = unavailable_note(
+                        "firecrawl",
+                        self.config.firecrawl_enabled,
+                        "FIRECRAWL_ENABLED",
+                        "FIRECRAWL_API_KEY",
+                        "x-firecrawl-api-key",
+                    );
+                    SourceNote::new(
+                        unavailable.kind,
+                        format!("{} — also {SKIPPED}", unavailable.detail),
+                    )
                 }
-            }
+            });
+            return RawSources::empty(notes);
         }
-        (Vec::new(), RawSourceOrigin::None)
+        match &self.fallback_sources {
+            Some(provider) => match provider.search_sources(query, count, filters).await {
+                Ok(sources) => match usable_or_note("firecrawl", sources) {
+                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Fallback),
+                    Err(note) => notes.push(note),
+                },
+                Err(err) => notes.push(SourceNote::broken(format!("firecrawl: {err}"))),
+            },
+            None => notes.push(unavailable_note(
+                "firecrawl",
+                self.config.firecrawl_enabled,
+                "FIRECRAWL_ENABLED",
+                "FIRECRAWL_API_KEY",
+                "x-firecrawl-api-key",
+            )),
+        }
+        RawSources::empty(notes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -632,14 +675,60 @@ impl SearchService {
         deadline: tokio::time::Instant,
         session_id: String,
         response: SearchResponse,
-        raw_sources: Vec<Source>,
-        raw_origin: RawSourceOrigin,
+        raw: RawSources,
         reason: &str,
         include_content: bool,
     ) -> Result<WebSearchOutput> {
-        let mut fallback = raw_sources;
+        let RawSources {
+            sources,
+            origin,
+            notes,
+        } = raw;
+        let mut fallback = sources;
         fallback.truncate(self.config.fallback_sources);
-        let fallback = with_provider(fallback, fallback_label(raw_origin));
+        let fallback = with_provider(fallback, fallback_label(origin));
+        // A metadata-only Grok response — citations but no prose — routes here
+        // as `grok_content_empty`, and its citations are real evidence. Merge
+        // them rather than dropping them: they keep their `grok_responses`
+        // label, exactly as on the success path.
+        let fallback = merge_sources(response.sources, fallback);
+
+        // A degraded response with zero sources carries no evidence *and* no
+        // answer — the original Grok text is deliberately not echoed on this
+        // path. Returning `Ok` here handed the caller a successful-looking
+        // empty result, which client models read as "the tool works, this
+        // query just missed" and answer by retrying the same dead path
+        // forever. Fail loudly instead, naming the upstream reason, what each
+        // source provider did, and what would actually change the outcome.
+        if fallback.is_empty() {
+            // A zero budget truncates the fan-out to nothing whatever the
+            // providers returned, so it outranks every other account of the
+            // failure: no reformulated query can rescue this path while it
+            // holds. Testing the config directly rather than inferring it from
+            // an empty source list is what keeps that true when the providers
+            // also came back empty.
+            return Err(GrokSearchError::Provider(
+                if self.config.fallback_sources == 0 {
+                    // Providers that were consulted still get to say what they
+                    // saw; when the budget alone is at fault there are no notes
+                    // and nothing to append.
+                    let detail = if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", source_diagnosis(&notes))
+                    };
+                    format!(
+                        "web_search returned no sources: {reason}, and the fallback source budget is 0 (GROK_SEARCH_FALLBACK_SOURCES), so nothing from the source fan-out can survive{detail}. Raise that budget to get evidence on this path; no change of query can help while it is 0."
+                    )
+                } else {
+                    format!(
+                        "web_search returned no sources: {reason}, and the source fallback produced nothing ({}). {}",
+                        source_diagnosis(&notes),
+                        fallback_remediation(&notes)
+                    )
+                },
+            ));
+        }
 
         // D-03: the degraded path enriches eagerly — one-hand evidence is most
         // valuable when there is no verifiable summary, so there is no
@@ -961,6 +1050,269 @@ enum RawSourceOrigin {
     None,
     Primary,
     Fallback,
+}
+
+/// Outcome of the speculative source fan-out: the sources plus a per-provider
+/// account of what happened. `notes` stays empty on the happy path (a provider
+/// that returns results short-circuits before anything is recorded); it is
+/// populated only when a provider yields nothing, so a request that ends with
+/// zero sources can say why.
+struct RawSources {
+    sources: Vec<Source>,
+    origin: RawSourceOrigin,
+    notes: Vec<SourceNote>,
+}
+
+impl RawSources {
+    fn found(sources: Vec<Source>, origin: RawSourceOrigin) -> Self {
+        Self {
+            sources,
+            origin,
+            notes: Vec::new(),
+        }
+    }
+
+    fn empty(notes: Vec<SourceNote>) -> Self {
+        Self {
+            sources: Vec::new(),
+            origin: RawSourceOrigin::None,
+            notes,
+        }
+    }
+}
+
+/// Upstream error text is quoted verbatim by the provider layer, and a gateway
+/// or intermediary can answer with an arbitrarily large HTML page. Notes now
+/// reach the caller inside a tool error, which no response budget applies to,
+/// so each one is capped where it is recorded.
+const MAX_SOURCE_NOTE_CHARS: usize = 300;
+
+/// What kind of dead end a provider hit, which is what decides the useful
+/// remedy. Collapsing these into "did it work" would hand every failure the
+/// same advice, and the advice differs sharply: a deliberately disabled
+/// fan-out is not a broken upstream, and neither is an honest empty result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteKind {
+    /// The provider answered normally and simply had no matches, or was
+    /// deliberately skipped by the filter gate. The query is the thing to
+    /// change.
+    NoResults,
+    /// The operator switched this path off — a disabled provider, or a source
+    /// budget of zero. Nothing is broken; the configuration says no.
+    Config,
+    /// A missing credential or an upstream failure. Something has to be fixed
+    /// before this path can work at all.
+    Broken,
+}
+
+/// One provider's account of why it produced nothing.
+struct SourceNote {
+    kind: NoteKind,
+    detail: String,
+}
+
+impl SourceNote {
+    fn new(kind: NoteKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: truncate_note(detail.into()),
+        }
+    }
+
+    fn no_results(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::NoResults, detail)
+    }
+
+    fn config(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::Config, detail)
+    }
+
+    fn broken(detail: impl Into<String>) -> Self {
+        Self::new(NoteKind::Broken, detail)
+    }
+}
+
+fn truncate_note(mut detail: String) -> String {
+    if detail.chars().count() <= MAX_SOURCE_NOTE_CHARS {
+        return detail;
+    }
+    let cut = detail
+        .char_indices()
+        .nth(MAX_SOURCE_NOTE_CHARS)
+        .map(|(idx, _)| idx)
+        .unwrap_or(detail.len());
+    detail.truncate(cut);
+    detail.push('…');
+    detail
+}
+
+/// One-line account of why no source provider produced anything, for the
+/// zero-source failure message. Carries provider error text (status codes,
+/// upstream detail) but never any credential: keys travel in headers, and the
+/// provider errors these notes wrap quote only the endpoint and response body.
+fn source_diagnosis(notes: &[SourceNote]) -> String {
+    if notes.is_empty() {
+        "no source provider was consulted".to_string()
+    } else {
+        notes
+            .iter()
+            .map(|note| note.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Keep only what the rest of the pipeline can act on, or explain what the
+/// provider did instead.
+///
+/// Both normalizers accept an entry whose `url` is an empty string, and
+/// `merge_sources` discards those — but only far downstream, after the caller
+/// has already truncated to its source budget. Left in place, a blank entry
+/// consumes a budget slot and silently displaces real evidence: a budget of 1
+/// against `[blank, valid]` used to keep the blank, drop the valid source in
+/// `merge_sources`, and fail the whole request. Filtering here means truncation
+/// only ever applies to sources that will survive.
+fn usable_or_note(
+    provider: &str,
+    sources: Vec<Source>,
+) -> std::result::Result<Vec<Source>, SourceNote> {
+    let returned = sources.len();
+    let usable: Vec<Source> = sources
+        .into_iter()
+        .filter(|source| !source.url.trim().is_empty())
+        .collect();
+    if !usable.is_empty() {
+        return Ok(usable);
+    }
+    // An empty answer is an honest no-match; an answer made entirely of blanks
+    // is a provider returning something unusable, which is a different problem
+    // with a different remedy.
+    Err(if returned == 0 {
+        SourceNote::no_results(format!("{provider}: no results"))
+    } else {
+        SourceNote::broken(format!("{provider}: results carried no usable URLs"))
+    })
+}
+
+/// What would actually change the outcome, composed from every kind of dead
+/// end present rather than one chosen by precedence. Mixed outcomes are the
+/// common case — Tavily answering normally with no matches while Firecrawl has
+/// no key — and there a different query can still succeed through the healthy
+/// provider without anyone touching the other one's credentials. Suppressing
+/// that advice would rule out the move that works; equally, the "do not just
+/// repeat this" signal has to survive whenever nothing answered normally,
+/// since that is what a client model needs to stop retrying a dead path.
+fn fallback_remediation(notes: &[SourceNote]) -> String {
+    if notes.is_empty() {
+        return "Retrying will not help until the Grok upstream or the source-provider credentials are fixed.".to_string();
+    }
+    let has = |kind: NoteKind| notes.iter().any(|note| note.kind == kind);
+    let mut parts = Vec::new();
+    if has(NoteKind::NoResults) {
+        parts.push("A source provider answered normally with no matches, so a different query or looser filters may help.");
+    }
+    if has(NoteKind::Config) {
+        // Only a provider disabled through its own switch reaches this far: the
+        // other producer of `Config` is the zero fan-out, which cannot happen
+        // without a zero fallback budget, and `finalize_fallback` reports that
+        // before asking for a remediation. Raising the budget would not
+        // instantiate a switched-off provider, so it is not offered here.
+        parts.push(
+            "A source provider is switched off; enable it (TAVILY_ENABLED / FIRECRAWL_ENABLED).",
+        );
+    }
+    if has(NoteKind::Broken) {
+        parts.push("A source provider is unusable until its credentials or upstream are fixed.");
+    }
+    if !has(NoteKind::NoResults) {
+        // Deliberately not an absolute claim. A Grok timeout or 5xx clears on
+        // its own, and an unchanged retry does succeed once it does — but not
+        // before, which is what a client model looping on the same dead path
+        // needs to hear.
+        parts.push("Repeating this query unchanged will fail the same way until the condition above clears.");
+    }
+    parts.join(" ")
+}
+
+/// Why a source provider is absent from the service: the operator switched it
+/// off (a configuration choice), or no key ever reached the process (something
+/// to fix). The key hint names both channels because the HTTP transport
+/// ignores server-side env keys entirely — a self-hoster who set the key in
+/// their compose file needs to be told that the request header is the only one
+/// that counts there.
+fn unavailable_note(
+    provider: &str,
+    enabled: bool,
+    enable_var: &str,
+    key_var: &str,
+    header: &str,
+) -> SourceNote {
+    if enabled {
+        SourceNote::broken(format!(
+            "{provider}: no API key ({key_var} for stdio, {header} header for the HTTP transport)"
+        ))
+    } else {
+        SourceNote::config(format!("{provider}: disabled via {enable_var}"))
+    }
+}
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+
+    // A switched-off provider is the only `Config` note that can reach the
+    // remediation — the zero fan-out is reported by `finalize_fallback` before
+    // this runs — and raising the source budget cannot instantiate one, so that
+    // advice must not appear.
+    #[test]
+    fn disabled_provider_is_told_to_enable_not_to_raise_the_budget() {
+        let notes = vec![unavailable_note(
+            "tavily",
+            false,
+            "TAVILY_ENABLED",
+            "TAVILY_API_KEY",
+            "x-tavily-api-key",
+        )];
+        let remediation = fallback_remediation(&notes);
+        assert!(remediation.contains("TAVILY_ENABLED"), "{remediation}");
+        assert!(
+            !remediation.contains("GROK_SEARCH_FALLBACK_SOURCES"),
+            "{remediation}"
+        );
+    }
+
+    // A Grok timeout or 5xx clears on its own, so the no-retry line must stop
+    // short of claiming a repeat can never work — while still telling a looping
+    // client that repeating it *now* changes nothing.
+    #[test]
+    fn retry_guidance_is_conditional_not_absolute() {
+        let notes = vec![SourceNote::broken("tavily: provider error: HTTP 500")];
+        let remediation = fallback_remediation(&notes);
+        assert!(
+            remediation.contains("until the condition above clears"),
+            "{remediation}"
+        );
+        assert!(!remediation.contains("will not help"), "{remediation}");
+    }
+
+    // A provider that answered normally leaves a reformulated query on the
+    // table, so the no-retry line stays out of the way entirely.
+    #[test]
+    fn a_healthy_empty_result_keeps_the_retry_door_open() {
+        let notes = vec![
+            SourceNote::no_results("tavily: no results"),
+            SourceNote::broken("firecrawl: no API key"),
+        ];
+        let remediation = fallback_remediation(&notes);
+        assert!(
+            remediation.contains("a different query or looser filters"),
+            "{remediation}"
+        );
+        assert!(
+            !remediation.contains("Repeating this query unchanged"),
+            "{remediation}"
+        );
+    }
 }
 
 /// Pick the model the active transport actually understands. Responses speaks

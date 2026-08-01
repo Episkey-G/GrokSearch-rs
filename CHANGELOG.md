@@ -38,6 +38,71 @@ All notable changes to GrokSearch-rs are documented here.
   来源误判为补充来源。该错位源自最初 firecrawl 分支硬编码标签、忽略路径参数,
   后续重构机械保留。现修正标签并补 fallback 路径 provenance 测试,
   docs/ARCHITECTURE.md 的 provenance 枚举同步新增 `firecrawl_fallback`。
+- **兜底一条来源都没拿到时,`web_search` 不再返回「成功但空」的结果——改为报错。**
+  Grok 上游挂掉后走 `finalize_fallback`,若 Tavily/Firecrawl 也没产出任何来源,
+  此前仍返回 `Ok`:`sources_count: 0`、无 `isError`,正文写着「Source fallback
+  returned 0 source(s); evaluate them directly」——而一条来源都没有,原始 Grok
+  文本在这条路径上也是被丢弃的。客户端模型把它读成「工具是好的,只是这次没搜到」,
+  于是换个措辞重试,每次都走同一条死路径拿到同样的空壳成功,形成无限重试循环
+  (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
+  进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
+  以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。十一处 Codex 评审
+  采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
+  其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
+  静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
+  (2) provider 错误会原样引用上游响应体(可为任意大的 HTML 错误页),而这些
+  诊断现在走的是不受响应预算约束的错误通道,故每条 note 截断至 300 字符;
+  (3) 补救建议按 note 三态给出而非一刀切——provider 正常返回空结果(或因
+  filters 被有意跳过 Firecrawl)说「换 query 或放宽 filters」;fan-out 被配置
+  关掉(两个 budget 都为 0,或 `*_ENABLED` 关闭)说「开启 provider 或调大
+  `GROK_SEARCH_FALLBACK_SOURCES`」;只有缺 key 或上游报错才说「修凭据/上游」。
+  此前把「配置主动关掉」和「上游坏了」混为一类,会让运维去查根本没问题的凭据。
+  (4) 混合情形改为**组合**而非单选优先级:Tavily 正常返回空、Firecrawl 缺 key
+  时,换个 query 仍可能从 Tavily 拿到结果而无需动 Firecrawl 的凭据,故两条建议
+  同时给出;只有在**没有任何 provider 正常作答**时才附上「原样重试无用」这句
+  ——那正是打断死循环所需的信号。(5) `url` 为空串的结果不再算作 provider 成功:
+  两个 normalizer 都只拒绝缺失/非字符串的 `url`(空串照收),而 `merge_sources`
+  下游会把空 URL 全部丢弃,此前会导致 notes 连同"成功"一起被丢、最终错误消息
+  谎称「no source provider was consulted」。现在要求至少一条可用 URL,否则记为
+  「results carried no usable URLs」。(6) `FALLBACK_SOURCES=0` 的判定改为直接读
+  配置,不再附加「provider 曾返回过结果」这个条件:`extra_sources` 非 0 时 fan-out
+  照跑,provider 返回空则原本会掩盖掉真正的原因、转而建议「换 query」——可
+  `truncate(0)` 会把任何结果清空,那条建议在该配置下**永远**不可能奏效。现在
+  budget 为 0 时一律优先报告它,同时保留 provider 的诊断。(7) 承 (6) 之后,能走到
+  `fallback_remediation` 的 `Config` note 只剩「provider 被 `*_ENABLED` 关掉」
+  一种(fan-out disabled 必然伴随 budget=0,已被前置分支拦截),而调大 budget
+  并不能把关掉的 provider 变出来,故该建议里去掉这半句。(8)「原样重试无用」
+  改为「原样重试会以同样方式失败,直到上述状况解除」:Grok 超时/5xx 会自行恢复,
+  绝对化的断言不成立;但对正在死循环的客户端模型,「此刻重试不会有变化」这个
+  信号必须保留——这正是本次修复的目的。(9) filters 跳过 Firecrawl 那条 note 不再
+  无条件记为「正常空结果」:只有 Firecrawl 确实配好时,「放宽 filters」才是真能
+  奏效的补救;若 Firecrawl 本就没配或被关掉,放宽 filters 也够不到任何 provider,
+  此时改记为对应的不可用 note(两条事实都保留:被 filters 跳过 + 本来也不可用)。
+  (10) 空 URL 改为**过滤**而非仅**判定**:此前 `[空, 有效]` 这样的结果会整体
+  通过判定,随后 `truncate(budget)` 先执行、`merge_sources` 丢空 URL 后执行——
+  budget=1 时那条有效来源会被空条目挤掉,整个请求以硬错误告终(enrichment 主
+  路径同理,该问题早于本 PR 存在)。现在在构造 `RawSources::found` 前就滤掉空
+  URL,截断只作用于确定能存活的来源。(11) 空白的 `TAVILY_API_KEY` /
+  `FIRECRAWL_API_KEY` 归一化为「未配置」:此前 `Some("")` 会照常构造出 provider,
+  那个 provider 只能对每次调用 401,而所有可用性判断(含本次新增的 filters 闸门、
+  以及 `doctor`)都会把它报成「已配置」。相邻字段(`grok_auth_file`、
+  `openai_compatible_*`)本就有这层过滤,两个 source key 是漏了;现补齐并按
+  `trim()` 判断——全空白的 key 不比空串更可用。
+- **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
+  `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
+  被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。
+  现在每条失败路径都记录成一句 note(如 `tavily: provider error: Tavily returned
+  HTTP 432 …`、`firecrawl: no API key (FIRECRAWL_API_KEY for stdio,
+  x-firecrawl-api-key header for the HTTP transport)`、`firecrawl: skipped
+  (request carries domain/recency filters …)`),汇总进上面那条错误消息。
+  note 只含 endpoint 与上游响应体,不含任何凭据。
+- **HTTP 传输启动时,会对被忽略的服务端凭据环境变量告警。** 远程传输按设计
+  剥离服务端的 `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` 等(凭据只来自请求头),
+  但此前是静默剥离:自托管者在 docker-compose 里配好 key,服务端看起来一切正常,
+  实际每个请求都在没有任何兜底 provider 的状态下跑,且没有任何线索指向原因。
+  现在 `run_http` 启动时对每个存在的被剥离变量打一行 warning,并指明应改用哪个
+  请求头(如 `x-tavily-api-key`)。只打变量名与请求头名,绝不打值。
 
 ## 0.1.22 - 2026-07-22
 

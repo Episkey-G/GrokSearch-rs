@@ -279,14 +279,26 @@ impl Config {
                 "TAVILY_API_URL",
                 "https://api.tavily.com",
             )),
-            tavily_api_key: map.get("TAVILY_API_KEY").cloned(),
+            // Blank means absent, as it already does for the auth file and the
+            // OpenAI-compatible settings below. Kept as `Some("")` these build
+            // a provider that exists only to 401 on every call, which makes
+            // `doctor` and every availability check report a source that is
+            // configured when nothing can come of it. Trimmed, because a
+            // whitespace-only key is no more usable than an empty one.
+            tavily_api_key: map
+                .get("TAVILY_API_KEY")
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
             tavily_enabled: bool_value(&map, "TAVILY_ENABLED", true),
             firecrawl_api_url: normalize_v1_base(&get(
                 &map,
                 "FIRECRAWL_API_URL",
                 "https://api.firecrawl.dev",
             )),
-            firecrawl_api_key: map.get("FIRECRAWL_API_KEY").cloned(),
+            firecrawl_api_key: map
+                .get("FIRECRAWL_API_KEY")
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
             firecrawl_enabled: bool_value(&map, "FIRECRAWL_ENABLED", true),
             default_extra_sources: usize_value(&map, "GROK_SEARCH_EXTRA_SOURCES", 3),
             fallback_sources: usize_value(&map, "GROK_SEARCH_FALLBACK_SOURCES", 5),
@@ -643,6 +655,23 @@ mod source_config_tests {
         let cfg = Config::from_env_map(Vec::<(String, String)>::new());
         assert_eq!(cfg.source_max_answers, 5);
         assert_eq!(cfg.source_max_comments, 30);
+    }
+
+    // A blank key must read as absent, not as a configured provider: kept as
+    // `Some("")` it builds a source provider that can only 401, and every
+    // availability check downstream then reports a source that cannot work.
+    #[test]
+    fn blank_source_keys_read_as_absent() {
+        let cfg = Config::from_env_map([("TAVILY_API_KEY", ""), ("FIRECRAWL_API_KEY", "   ")]);
+        assert_eq!(cfg.tavily_api_key, None);
+        assert_eq!(cfg.firecrawl_api_key, None);
+
+        let configured = Config::from_env_map([
+            ("TAVILY_API_KEY", "tvly-real"),
+            ("FIRECRAWL_API_KEY", "fc-1"),
+        ]);
+        assert_eq!(configured.tavily_api_key.as_deref(), Some("tvly-real"));
+        assert_eq!(configured.firecrawl_api_key.as_deref(), Some("fc-1"));
     }
 
     #[test]

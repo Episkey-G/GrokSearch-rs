@@ -290,6 +290,518 @@ async fn web_search_falls_back_to_firecrawl_when_tavily_returns_nothing() {
         .all(|source| source.provider == "firecrawl_fallback"));
 }
 
+// A dead Grok upstream plus a source fallback that produces nothing leaves
+// nothing to return at all — no answer, no evidence. Reporting that as a
+// successful empty search is what drove client models into endless retry
+// loops, so it must be a hard error naming the upstream reason and what each
+// source provider did.
+#[tokio::test]
+async fn web_search_errors_when_grok_and_every_source_provider_fail() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a zero-source fallback must fail rather than report success");
+
+    let message = err.to_string();
+    assert!(message.contains("grok_provider_error"), "{message}");
+    assert!(
+        message.contains("tavily: provider error: source failed"),
+        "{message}"
+    );
+    // An absent provider must name the header too: a self-hosted HTTP
+    // deployment ignores the server-side env key outright.
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(message.contains("x-firecrawl-api-key"), "{message}");
+    assert!(
+        message.contains("credentials or upstream are fixed"),
+        "{message}"
+    );
+    // Nothing answered normally here, so the do-not-just-retry signal — the
+    // whole point of failing instead of returning an empty success — must be
+    // present, without overclaiming that a repeat can never work.
+    assert!(
+        message.contains("Repeating this query unchanged will fail the same way"),
+        "{message}"
+    );
+}
+
+// Filter-constrained requests are Tavily-or-nothing by design (Firecrawl
+// cannot honor domain/recency filters). When that gate is what leaves the
+// response empty, the error has to say so — otherwise the operator sees a
+// configured Firecrawl key that never fires and no reason why.
+#[tokio::test]
+async fn web_search_error_names_the_filter_gate_that_skipped_firecrawl() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
+        Arc::new(FailingSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_domains: vec!["example.com".to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect_err("a filter-gated fallback with no tavily results must fail");
+
+    let message = err.to_string();
+    assert!(message.contains("grok_sources_empty"), "{message}");
+    assert!(message.contains("firecrawl: skipped"), "{message}");
+    assert!(message.contains("filters"), "{message}");
+    // Firecrawl is configured here, so dropping the filters really would reach
+    // it — the remedy is honest.
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+}
+
+// The filter gate only justifies "loosen the filters" when there is a Firecrawl
+// on the other side of it. With none configured, dropping the filters reaches
+// nothing, so the note must carry the configuration problem instead of reading
+// as an honest empty result.
+#[tokio::test]
+async fn web_search_error_does_not_blame_filters_when_firecrawl_is_absent() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(EmptySourcesAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_domains: vec!["example.com".to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect_err("filter-gated fallback with no firecrawl must fail");
+
+    let message = err.to_string();
+    // Both facts survive: the gate skipped it, and it was not there anyway.
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(message.contains("also skipped"), "{message}");
+    assert!(
+        !message.contains("a different query or looser filters"),
+        "{message}"
+    );
+}
+
+// The zero-source guard must stay off the degraded-but-useful path: a fallback
+// that produced evidence still returns Ok.
+#[tokio::test]
+async fn web_search_still_succeeds_when_fallback_has_sources() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(FailingSourceProvider),
+        Some(Arc::new(FirecrawlLikeSourceProvider)),
+        [("GROK_SEARCH_FALLBACK_SOURCES", "2")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("a fallback that found sources still succeeds");
+
+    assert!(output.fallback_used);
+    assert_eq!(output.sources_count, 2);
+    // Guards D-03's eager enrichment on the degraded path: nothing in the
+    // suite noticed when that block went missing, so pin it here.
+    assert!(
+        output.sources.iter().any(|source| source.content.is_some()),
+        "fallback path must still enrich inline content: {:?}",
+        output.sources
+    );
+}
+
+struct MetadataOnlyAiProvider;
+
+#[async_trait]
+impl AiProvider for MetadataOnlyAiProvider {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Ok(SearchResponse {
+            content: String::new(),
+            sources: vec![Source::new(
+                "https://grok.example/cited".to_string(),
+                "grok_responses",
+            )],
+        })
+    }
+}
+
+struct EmptyResultSourceProvider;
+
+#[async_trait]
+impl SourceProvider for EmptyResultSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+struct HugeErrorSourceProvider;
+
+#[async_trait]
+impl SourceProvider for HugeErrorSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        // What an intermediary answering with a full HTML error page looks like
+        // once the provider layer quotes the body verbatim.
+        Err(GrokSearchError::Provider(format!(
+            "Tavily returned HTTP 502: {}",
+            "x".repeat(20_000)
+        )))
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A metadata-only Grok response (citations, no prose) is a supported upstream
+// shape that routes through the degraded path as `grok_content_empty`. Those
+// citations are real evidence, so the zero-source guard must not fire on them
+// — and they must survive into the response rather than being dropped.
+#[tokio::test]
+async fn web_search_keeps_grok_citations_when_the_response_has_no_prose() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(MetadataOnlyAiProvider)),
+        Arc::new(FailingSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("grok citations are evidence even with no prose");
+
+    assert!(output.fallback_used);
+    assert_eq!(
+        output.fallback_reason,
+        Some("grok_content_empty".to_string())
+    );
+    assert_eq!(output.sources_count, 1);
+    assert_eq!(output.sources[0].url, "https://grok.example/cited");
+    assert_eq!(output.sources[0].provider, "grok_responses");
+}
+
+// Providers that answered normally with nothing to show are not a broken
+// upstream: the query is the thing to change, so the error must not tell the
+// caller that retrying is futile until credentials are fixed.
+#[tokio::test]
+async fn web_search_error_tells_healthy_providers_to_change_the_query() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        Some(Arc::new(EmptyResultSourceProvider)),
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(message.contains("firecrawl: no results"), "{message}");
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+    assert!(!message.contains("credentials"), "{message}");
+}
+
+// Provider errors quote the upstream body verbatim, and these notes now travel
+// inside a tool error that no response budget applies to.
+#[tokio::test]
+async fn web_search_error_bounds_a_huge_provider_diagnostic() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(HugeErrorSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("zero sources still fails");
+
+    let message = err.to_string();
+    assert!(message.contains("Tavily returned HTTP 502"), "{message}");
+    assert!(
+        message.contains('…'),
+        "truncation marker missing: {message}"
+    );
+    assert!(
+        message.chars().count() < 1_000,
+        "diagnostic not bounded, got {} chars",
+        message.chars().count()
+    );
+}
+
+// Both source budgets at 0 disables the fan-out entirely: no provider is ever
+// consulted, so nothing is broken and no credential is missing. Raising the
+// budget is the remedy, and the error has to say that rather than sending the
+// operator off to check keys.
+#[tokio::test]
+async fn web_search_error_names_the_disabled_fan_out_rather_than_credentials() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(CountingSourceProvider::default()),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "0"),
+            ("GROK_SEARCH_FALLBACK_SOURCES", "0"),
+        ],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("source fan-out disabled"), "{message}");
+    assert!(
+        message.contains("GROK_SEARCH_FALLBACK_SOURCES"),
+        "{message}"
+    );
+    assert!(!message.contains("credentials"), "{message}");
+}
+
+// A zero fallback budget truncates the fan-out to nothing regardless of what
+// the providers returned, so no reformulated query can rescue this path. The
+// error has to say that instead of sending the caller off to rewrite a query
+// that provably cannot succeed.
+#[tokio::test]
+async fn web_search_error_names_a_zero_fallback_budget_even_when_providers_answered() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "3"),
+            ("GROK_SEARCH_FALLBACK_SOURCES", "0"),
+        ],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a zero budget leaves nothing to return");
+
+    let message = err.to_string();
+    assert!(message.contains("fallback source budget is 0"), "{message}");
+    assert!(message.contains("no change of query can help"), "{message}");
+    // What the providers saw is still worth reporting.
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(
+        !message.contains("a different query or looser filters"),
+        "{message}"
+    );
+}
+
+struct BlankThenValidSourceProvider;
+
+#[async_trait]
+impl SourceProvider for BlankThenValidSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        Ok(vec![
+            Source::new(String::new(), "tavily"),
+            Source::new("https://example.com/valid".to_string(), "tavily"),
+        ])
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A blank URL ahead of a real one must not consume the source budget: the
+// budget is applied before `merge_sources` drops blanks, so keeping it would
+// discard the only usable evidence and fail a request that had some.
+#[tokio::test]
+async fn web_search_fallback_keeps_valid_sources_behind_a_blank_url() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(BlankThenValidSourceProvider),
+        None,
+        [("GROK_SEARCH_FALLBACK_SOURCES", "1")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            include_content: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("a usable source behind a blank one is still evidence");
+
+    assert!(output.fallback_used);
+    assert_eq!(output.sources_count, 1);
+    assert_eq!(output.sources[0].url, "https://example.com/valid");
+}
+
+struct BlankUrlSourceProvider;
+
+#[async_trait]
+impl SourceProvider for BlankUrlSourceProvider {
+    async fn search_sources(
+        &self,
+        _query: &str,
+        _max_results: usize,
+        _filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        // Both normalizers accept an entry whose `url` is an empty string.
+        Ok(vec![Source::new(String::new(), "tavily")])
+    }
+
+    async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+        Ok(FetchedPage::text("fetched"))
+    }
+
+    async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+        Ok(Vec::new())
+    }
+}
+
+// A provider whose results carry no usable URL has not really answered:
+// `merge_sources` drops those entries downstream. Counting it as a success
+// would discard the notes and leave the failure claiming nothing was ever
+// consulted, which is the opposite of what happened.
+#[tokio::test]
+async fn web_search_error_names_a_provider_that_returned_unusable_urls() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(BlankUrlSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("blank URLs leave nothing to return");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("tavily: results carried no usable URLs"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("no source provider was consulted"),
+        "{message}"
+    );
+}
+
+// Mixed outcome: Tavily answered normally with no matches while Firecrawl has
+// no key. A different query can still succeed through Tavily without anyone
+// touching Firecrawl's credentials, so both remedies have to survive.
+#[tokio::test]
+async fn web_search_error_keeps_query_advice_when_only_one_provider_is_broken() {
+    let service = SearchService::fake_custom(
+        Some(Arc::new(ProviderErrAiProvider)),
+        Arc::new(EmptyResultSourceProvider),
+        None,
+        [] as [(&str, &str); 0],
+    );
+
+    let err = service
+        .web_search(WebSearchInput {
+            query: "anything".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("no sources anywhere is still a failure");
+
+    let message = err.to_string();
+    assert!(message.contains("tavily: no results"), "{message}");
+    assert!(message.contains("firecrawl: no API key"), "{message}");
+    assert!(
+        message.contains("a different query or looser filters"),
+        "{message}"
+    );
+    assert!(
+        message.contains("credentials or upstream are fixed"),
+        "{message}"
+    );
+    // Tavily is alive, so a reformulated query is a legitimate next move and
+    // must not be ruled out.
+    assert!(
+        !message.contains("Repeating this query unchanged"),
+        "{message}"
+    );
+}
+
 #[tokio::test]
 async fn fallback_honors_include_content_false() {
     // include_content=false is an explicit opt-out and must suppress inline
