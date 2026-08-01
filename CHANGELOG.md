@@ -47,7 +47,7 @@ All notable changes to GrokSearch-rs are documented here.
   (用户实测复现)。现在这种情况返回 `GrokSearchError::Provider`,消息里带上
   进入兜底的原因(如 `grok_provider_error`)、每个来源 provider 各自发生了什么,
   以及「怎样才能改变结果」的明确指引。`GROK_SEARCH_FALLBACK_SOURCES=0` 导致截断
-  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。十处 Codex 评审
+  为空的情况单独给出自己的原因。兜底拿到来源时行为完全不变。十一处 Codex 评审
   采纳:(1) metadata-only 的 Grok 响应(有引用无正文,`grok_content_empty`)
   其引用是真实证据,现合并进兜底结果而非连同报错一起丢弃——此前该路径本就
   静默丢弃 `response.sources`,现按成功路径同样的 `grok_responses` 标签保留;
@@ -83,7 +83,12 @@ All notable changes to GrokSearch-rs are documented here.
   通过判定,随后 `truncate(budget)` 先执行、`merge_sources` 丢空 URL 后执行——
   budget=1 时那条有效来源会被空条目挤掉,整个请求以硬错误告终(enrichment 主
   路径同理,该问题早于本 PR 存在)。现在在构造 `RawSources::found` 前就滤掉空
-  URL,截断只作用于确定能存活的来源。
+  URL,截断只作用于确定能存活的来源。(11) 空白的 `TAVILY_API_KEY` /
+  `FIRECRAWL_API_KEY` 归一化为「未配置」:此前 `Some("")` 会照常构造出 provider,
+  那个 provider 只能对每次调用 401,而所有可用性判断(含本次新增的 filters 闸门、
+  以及 `doctor`)都会把它报成「已配置」。相邻字段(`grok_auth_file`、
+  `openai_compatible_*`)本就有这层过滤,两个 source key 是漏了;现补齐并按
+  `trim()` 判断——全空白的 key 不比空串更可用。
 - **兜底为什么没产出来源,现在能看见了。** `fetch_raw_extra_sources` 此前用
   `if let Ok(...)` 把 provider 错误整个吞掉,运维无从区分「key 没配」「provider
   被开关关掉」「429/432 限流」「本来就没结果」「带了 filters 所以跳过 Firecrawl」。
