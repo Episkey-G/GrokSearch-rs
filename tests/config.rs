@@ -451,3 +451,90 @@ fn response_budget_defaults_and_env_overrides() {
     assert_eq!(overridden.max_inline_sources, 2);
     assert_eq!(overridden.response_max_chars, 30_000);
 }
+
+#[test]
+fn tinyfish_and_exa_defaults_are_enabled_with_official_endpoints() {
+    let cfg = Config::from_env_map([("GROK_SEARCH_API_KEY", "k")]);
+    assert_eq!(
+        cfg.tinyfish_search_api_url,
+        "https://api.search.tinyfish.ai"
+    );
+    assert_eq!(cfg.tinyfish_fetch_api_url, "https://api.fetch.tinyfish.ai");
+    assert_eq!(cfg.tinyfish_api_key, None);
+    assert!(cfg.tinyfish_enabled);
+    assert_eq!(cfg.exa_api_url, "https://api.exa.ai");
+    assert_eq!(cfg.exa_api_key, None);
+    assert!(cfg.exa_enabled);
+    assert!(cfg.source_providers.is_empty());
+}
+
+#[test]
+fn blank_tinyfish_and_exa_keys_mean_absent() {
+    let cfg = Config::from_env_map([("TINYFISH_API_KEY", "   "), ("EXA_API_KEY", "")]);
+    assert_eq!(cfg.tinyfish_api_key, None);
+    assert_eq!(cfg.exa_api_key, None);
+}
+
+#[test]
+fn tinyfish_and_exa_read_keys_urls_and_toggles() {
+    let cfg = Config::from_env_map([
+        ("TINYFISH_API_KEY", "tf-key"),
+        ("TINYFISH_SEARCH_API_URL", "https://search.proxy.example/"),
+        ("TINYFISH_FETCH_API_URL", "https://fetch.proxy.example/"),
+        ("TINYFISH_ENABLED", "false"),
+        ("EXA_API_KEY", "exa-key"),
+        ("EXA_API_URL", "https://exa.proxy.example/"),
+        ("EXA_ENABLED", "false"),
+    ]);
+    assert_eq!(cfg.tinyfish_api_key.as_deref(), Some("tf-key"));
+    assert_eq!(cfg.tinyfish_search_api_url, "https://search.proxy.example");
+    assert_eq!(cfg.tinyfish_fetch_api_url, "https://fetch.proxy.example");
+    assert!(!cfg.tinyfish_enabled);
+    assert_eq!(cfg.exa_api_key.as_deref(), Some("exa-key"));
+    assert_eq!(cfg.exa_api_url, "https://exa.proxy.example");
+    assert!(!cfg.exa_enabled);
+}
+
+#[test]
+fn source_providers_csv_is_trimmed_lowercased_and_deduped() {
+    let cfg = Config::from_env_map([(
+        "GROK_SEARCH_SOURCE_PROVIDERS",
+        " Tavily, exa ,tavily,, TINYFISH ",
+    )]);
+    assert_eq!(cfg.source_providers, ["tavily", "exa", "tinyfish"]);
+}
+
+#[test]
+fn config_file_accepts_tinyfish_exa_and_source_providers() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+tinyfish_api_key = "tf-file"
+exa_api_key = "exa-file"
+source_providers = ["tinyfish", "exa"]
+"#,
+    )
+    .expect("write config");
+
+    let cfg = Config::load_from([("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string())]);
+    assert_eq!(cfg.tinyfish_api_key.as_deref(), Some("tf-file"));
+    assert_eq!(cfg.exa_api_key.as_deref(), Some("exa-file"));
+    assert_eq!(cfg.source_providers, ["tinyfish", "exa"]);
+}
+
+#[test]
+fn redacted_diagnostics_masks_tinyfish_and_exa_keys() {
+    let cfg = Config::from_env_map([
+        ("TINYFISH_API_KEY", "tf-secret-value"),
+        ("EXA_API_KEY", "exa-secret-value"),
+    ]);
+    let diagnostics = cfg.redacted_diagnostics();
+    assert!(
+        !diagnostics.contains("tf-secret-value") && !diagnostics.contains("exa-secret-value"),
+        "keys must never appear in diagnostics: {diagnostics}"
+    );
+    assert!(diagnostics.contains("tinyfish_api_key="));
+    assert!(diagnostics.contains("exa_api_key="));
+}

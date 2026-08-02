@@ -2,7 +2,34 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
-## 0.1.23 - 2026-08-01
+## Unreleased
+
+### Added
+
+- **可插拔的补充源链(source chain),新增 TinyFish 与 Exa 两个 provider。**
+  借鉴 smart-search 的 capability-chain 设计,把原先硬编码的 Tavily(primary)+
+  Firecrawl(fallback) 两槽位泛化为有序 provider 链:补充源与 generic fetch 按
+  链序尝试,第一个返回可用结果的 provider 胜出。默认链序为
+  `tavily → exa → tinyfish → firecrawl`(仅遍历已配置的 provider),
+  `GROK_SEARCH_SOURCE_PROVIDERS` 可显式重排/裁剪(非法名启动即报错)。
+  - **TinyFish**(closes #12):免费 Search & Fetch(不耗 credits,免费档限速
+    30 req/min),`TINYFISH_API_KEY` 一把 key 同时驱动
+    `api.search.tinyfish.ai`(GET)与 `api.fetch.tinyfish.ai`(POST,JS 渲染 +
+    PDF 抽取)。domain 过滤经 `site:`/`-site:` 操作符注入 query,
+    `recency_days` 映射为 `recency_minutes`。
+  - **Exa**:语义(embeddings-first)检索,原生支持
+    `includeDomains`/`excludeDomains`/`startPublishedDate`,fetch 走
+    `/contents`。按量计费,适合描述式查询、论文与官方域名发现。
+  - 远端 HTTP 传输新增 `X-Tinyfish-Api-Key` / `X-Exa-Api-Key` 两个
+    per-request 头;server 端环境变量同名 key 照旧被剥离,不会泄入租户请求。
+  - 来源标签泛化为 `{provider}_enrichment` / `{provider}_fallback`
+    (如 `exa_enrichment`、`tinyfish_fallback`);tavily/firecrawl 的既有标签、
+    filters 门控(带 domain/recency 过滤的请求跳过 Firecrawl)与 #31 的
+    零结果诊断语义全部保持不变。
+  - `doctor` 新增 `exa`/`tinyfish` 探针节点与 `source_chain` 字段,报告
+    生效的链序。
+
+
 
 ### Added
 

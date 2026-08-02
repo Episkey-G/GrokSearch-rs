@@ -13,9 +13,11 @@ use crate::model::search::{
 };
 use crate::model::source::{is_junk_title, merge_sources, FetchedPage, Source};
 use crate::model::tool::{GetSourcesOutput, WebFetchOutput, WebSearchInput, WebSearchOutput};
+use crate::providers::exa::ExaProvider;
 use crate::providers::firecrawl::FirecrawlProvider;
 use crate::providers::grok::GrokResponsesProvider;
 use crate::providers::tavily::TavilyProvider;
+use crate::providers::tinyfish::TinyfishProvider;
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -89,6 +91,254 @@ impl SourceProvider for FirecrawlProvider {
     }
 }
 
+#[async_trait]
+impl SourceProvider for TinyfishProvider {
+    async fn search_sources(
+        &self,
+        query: &str,
+        max_results: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        self.search(query, max_results, filters).await
+    }
+
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+        TinyfishProvider::fetch(self, url).await
+    }
+
+    async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
+        // No native site-map endpoint; a search on the URL is the closest
+        // discovery primitive (mirrors the Firecrawl impl above).
+        self.search(url, max_results, &SearchFilters::default())
+            .await
+    }
+}
+
+#[async_trait]
+impl SourceProvider for ExaProvider {
+    async fn search_sources(
+        &self,
+        query: &str,
+        max_results: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<Source>> {
+        self.search(query, max_results, filters).await
+    }
+
+    async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+        ExaProvider::fetch(self, url).await
+    }
+
+    async fn map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
+        // No native site-map endpoint; a search on the URL is the closest
+        // discovery primitive (mirrors the Firecrawl impl above).
+        self.search(url, max_results, &SearchFilters::default())
+            .await
+    }
+}
+
+/// Static description of one known source provider: how it is configured, how
+/// its absence is reported, and which request shapes it can honor. The
+/// service's source chain (`SourceSlot` list) is built from these at
+/// construction time.
+pub(crate) struct ProviderSpec {
+    pub(crate) name: &'static str,
+    display: &'static str,
+    enable_var: &'static str,
+    key_var: &'static str,
+    header: &'static str,
+    /// Whether the provider honors `SearchFilters` (recency + domain
+    /// include/exclude). Providers that cannot are *skipped* for filtered
+    /// requests instead of silently violating the filter contract.
+    supports_filters: bool,
+    /// Whether the provider exposes a real site-map endpoint (`web_map`).
+    supports_map: bool,
+    /// Core providers appear in zero-source diagnostics even when
+    /// unconfigured; optional ones are mentioned only when the operator names
+    /// them in `GROK_SEARCH_SOURCE_PROVIDERS`. Keeps "I never set up Exa"
+    /// from reading as a broken credential in every failure message.
+    core: bool,
+}
+
+const TAVILY_SPEC: ProviderSpec = ProviderSpec {
+    name: "tavily",
+    display: "Tavily",
+    enable_var: "TAVILY_ENABLED",
+    key_var: "TAVILY_API_KEY",
+    header: "x-tavily-api-key",
+    supports_filters: true,
+    supports_map: true,
+    core: true,
+};
+
+const EXA_SPEC: ProviderSpec = ProviderSpec {
+    name: "exa",
+    display: "Exa",
+    enable_var: "EXA_ENABLED",
+    key_var: "EXA_API_KEY",
+    header: "x-exa-api-key",
+    supports_filters: true,
+    supports_map: false,
+    core: false,
+};
+
+const TINYFISH_SPEC: ProviderSpec = ProviderSpec {
+    name: "tinyfish",
+    display: "TinyFish",
+    enable_var: "TINYFISH_ENABLED",
+    key_var: "TINYFISH_API_KEY",
+    header: "x-tinyfish-api-key",
+    supports_filters: true,
+    supports_map: false,
+    core: false,
+};
+
+const FIRECRAWL_SPEC: ProviderSpec = ProviderSpec {
+    name: "firecrawl",
+    display: "Firecrawl",
+    enable_var: "FIRECRAWL_ENABLED",
+    key_var: "FIRECRAWL_API_KEY",
+    header: "x-firecrawl-api-key",
+    supports_filters: false,
+    supports_map: false,
+    core: true,
+};
+
+/// Canonical chain order. Tavily's RAG-tuned results keep the primary slot;
+/// Exa (semantic search, native filter support) outranks the keyword engines
+/// among the newcomers; TinyFish is the free keyword/fetch tier; Firecrawl
+/// keeps its historical last-resort slot because its search cannot honor
+/// filters. `GROK_SEARCH_SOURCE_PROVIDERS` overrides this order entirely.
+const CANONICAL_SOURCE_ORDER: [&ProviderSpec; 4] =
+    [&TAVILY_SPEC, &EXA_SPEC, &TINYFISH_SPEC, &FIRECRAWL_SPEC];
+
+/// One instantiated provider in the source chain.
+#[derive(Clone)]
+struct SourceEntry {
+    spec: &'static ProviderSpec,
+    provider: Arc<dyn SourceProvider>,
+}
+
+/// One position in the configured source chain: an instantiated provider, or
+/// a known-but-absent provider remembered so zero-source failures can name
+/// what was missing and how to supply it (`enabled` decides whether the note
+/// reads as "switched off" or "no key").
+enum SourceSlot {
+    Active(SourceEntry),
+    Missing {
+        spec: &'static ProviderSpec,
+        enabled: bool,
+    },
+}
+
+fn instantiate_source(
+    spec: &'static ProviderSpec,
+    config: &Config,
+    http: &reqwest::Client,
+) -> Option<Arc<dyn SourceProvider>> {
+    match spec.name {
+        "tavily" => config
+            .tavily_enabled
+            .then(|| config.tavily_api_key.clone())
+            .flatten()
+            .map(|key| {
+                Arc::new(TavilyProvider::with_client(
+                    http.clone(),
+                    config.tavily_api_url.clone(),
+                    key,
+                )) as Arc<dyn SourceProvider>
+            }),
+        "exa" => config
+            .exa_enabled
+            .then(|| config.exa_api_key.clone())
+            .flatten()
+            .map(|key| {
+                Arc::new(ExaProvider::with_client(
+                    http.clone(),
+                    config.exa_api_url.clone(),
+                    key,
+                )) as Arc<dyn SourceProvider>
+            }),
+        "tinyfish" => config
+            .tinyfish_enabled
+            .then(|| config.tinyfish_api_key.clone())
+            .flatten()
+            .map(|key| {
+                Arc::new(TinyfishProvider::with_client(
+                    http.clone(),
+                    config.tinyfish_search_api_url.clone(),
+                    config.tinyfish_fetch_api_url.clone(),
+                    key,
+                )) as Arc<dyn SourceProvider>
+            }),
+        "firecrawl" => config
+            .firecrawl_enabled
+            .then(|| config.firecrawl_api_key.clone())
+            .flatten()
+            .map(|key| {
+                Arc::new(FirecrawlProvider::with_client(
+                    http.clone(),
+                    config.firecrawl_api_url.clone(),
+                    key,
+                )) as Arc<dyn SourceProvider>
+            }),
+        _ => None,
+    }
+}
+
+fn provider_enabled(spec: &ProviderSpec, config: &Config) -> bool {
+    match spec.name {
+        "tavily" => config.tavily_enabled,
+        "exa" => config.exa_enabled,
+        "tinyfish" => config.tinyfish_enabled,
+        "firecrawl" => config.firecrawl_enabled,
+        _ => false,
+    }
+}
+
+/// Resolve the effective source chain. Default: the canonical order over
+/// whatever is configured, with core providers (Tavily/Firecrawl) holding
+/// `Missing` slots when absent — preserving their long-standing place in
+/// zero-source diagnostics. With an explicit `GROK_SEARCH_SOURCE_PROVIDERS`
+/// list, exactly the named providers are slotted, and every named-but-absent
+/// one gets a `Missing` slot: the operator asked for it, so its absence is
+/// worth reporting.
+fn build_source_slots(config: &Config, http: &reqwest::Client) -> Result<Vec<SourceSlot>> {
+    let explicit = !config.source_providers.is_empty();
+    let specs: Vec<&'static ProviderSpec> = if explicit {
+        config
+            .source_providers
+            .iter()
+            .map(|name| {
+                CANONICAL_SOURCE_ORDER
+                    .iter()
+                    .copied()
+                    .find(|spec| spec.name == name)
+                    .ok_or_else(|| {
+                        GrokSearchError::InvalidParams(format!(
+                            "unknown source provider \"{name}\" in GROK_SEARCH_SOURCE_PROVIDERS (valid: tavily, exa, tinyfish, firecrawl)"
+                        ))
+                    })
+            })
+            .collect::<Result<_>>()?
+    } else {
+        CANONICAL_SOURCE_ORDER.to_vec()
+    };
+
+    let mut slots = Vec::new();
+    for spec in specs {
+        match instantiate_source(spec, config, http) {
+            Some(provider) => slots.push(SourceSlot::Active(SourceEntry { spec, provider })),
+            None if spec.core || explicit => slots.push(SourceSlot::Missing {
+                spec,
+                enabled: provider_enabled(spec, config),
+            }),
+            None => {}
+        }
+    }
+    Ok(slots)
+}
+
 #[derive(Clone)]
 pub struct SearchService {
     config: Config,
@@ -100,8 +350,10 @@ pub struct SearchService {
     /// chat-completions transport. Per-call overrides via `WebSearchInput.model`
     /// still win.
     default_model: String,
-    sources: Option<Arc<dyn SourceProvider>>,
-    fallback_sources: Option<Arc<dyn SourceProvider>>,
+    /// Ordered source-provider chain (first usable answer wins), with
+    /// `Missing` placeholders so diagnostics can name absent providers.
+    /// Behind `Arc` so `SearchService: Clone` stays cheap.
+    source_slots: Arc<Vec<SourceSlot>>,
     cache: Arc<Mutex<SourceCache>>,
     /// Shared reqwest client for the sources pipeline (same instance handed to
     /// providers). Stored here because resolve_content needs direct GET access.
@@ -119,8 +371,7 @@ pub struct SearchService {
 struct ProviderSet {
     ai: Arc<dyn AiProvider>,
     default_model: String,
-    sources: Option<Arc<dyn SourceProvider>>,
-    fallback_sources: Option<Arc<dyn SourceProvider>>,
+    source_slots: Vec<SourceSlot>,
     source_router: Arc<crate::sources::SourceRouter>,
 }
 
@@ -207,37 +458,14 @@ fn build_providers_with_grok(
         }
     };
 
-    let sources = if config.tavily_enabled {
-        config.tavily_api_key.clone().map(|key| {
-            Arc::new(TavilyProvider::with_client(
-                http.clone(),
-                config.tavily_api_url.clone(),
-                key,
-            )) as Arc<dyn SourceProvider>
-        })
-    } else {
-        None
-    };
-
-    let fallback_sources = if config.firecrawl_enabled {
-        config.firecrawl_api_key.clone().map(|key| {
-            Arc::new(FirecrawlProvider::with_client(
-                http.clone(),
-                config.firecrawl_api_url.clone(),
-                key,
-            )) as Arc<dyn SourceProvider>
-        })
-    } else {
-        None
-    };
+    let source_slots = build_source_slots(config, http)?;
 
     let source_router = Arc::new(crate::sources::SourceRouter::from_config(config));
 
     Ok(ProviderSet {
         ai,
         default_model: resolve_default_model(config),
-        sources,
-        fallback_sources,
+        source_slots,
         source_router,
     })
 }
@@ -343,11 +571,21 @@ impl SearchService {
             default_model: providers.default_model,
             config,
             ai: providers.ai,
-            sources: providers.sources,
-            fallback_sources: providers.fallback_sources,
+            source_slots: Arc::new(providers.source_slots),
             http_client: http,
             source_router: providers.source_router,
         }
+    }
+
+    /// Instantiated providers from the chain, in chain order.
+    fn active_sources(&self) -> Vec<SourceEntry> {
+        self.source_slots
+            .iter()
+            .filter_map(|slot| match slot {
+                SourceSlot::Active(entry) => Some(entry.clone()),
+                SourceSlot::Missing { .. } => None,
+            })
+            .collect()
     }
 
     /// Namespace a session id with the caller's tenant tag so cached
@@ -363,16 +601,52 @@ impl SearchService {
             ("GROK_SEARCH_API_KEY", "fake-grok"),
             ("TAVILY_API_KEY", "fake-tavily"),
         ]);
+        let firecrawl_enabled = config.firecrawl_enabled;
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources: Some(Arc::new(FakeSourceProvider)),
-            fallback_sources: None,
+            source_slots: Arc::new(vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(FakeSourceProvider),
+                }),
+                SourceSlot::Missing {
+                    spec: &FIRECRAWL_SPEC,
+                    enabled: firecrawl_enabled,
+                },
+            ]),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
         }
+    }
+
+    /// Legacy two-slot wiring for test factories: `primary` occupies the
+    /// Tavily slot and `fallback` the Firecrawl slot, exactly as the
+    /// pre-chain service was shaped.
+    fn fake_slots(
+        primary: Arc<dyn SourceProvider>,
+        fallback: Option<Arc<dyn SourceProvider>>,
+        firecrawl_enabled: bool,
+    ) -> Arc<Vec<SourceSlot>> {
+        let firecrawl_slot = match fallback {
+            Some(provider) => SourceSlot::Active(SourceEntry {
+                spec: &FIRECRAWL_SPEC,
+                provider,
+            }),
+            None => SourceSlot::Missing {
+                spec: &FIRECRAWL_SPEC,
+                enabled: firecrawl_enabled,
+            },
+        };
+        Arc::new(vec![
+            SourceSlot::Active(SourceEntry {
+                spec: &TAVILY_SPEC,
+                provider: primary,
+            }),
+            firecrawl_slot,
+        ])
     }
 
     /// Unified test factory: override AI / primary / fallback providers and
@@ -405,13 +679,13 @@ impl SearchService {
         );
         let config = Config::from_env_map(vars);
 
+        let source_slots = Self::fake_slots(primary, fallback, config.firecrawl_enabled);
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
             default_model: resolve_default_model(&config),
             config,
             ai: ai.unwrap_or_else(|| Arc::new(FakeAiProvider)),
-            sources: Some(primary),
-            fallback_sources: fallback,
+            source_slots,
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
         }
@@ -436,13 +710,13 @@ impl SearchService {
             ));
         }
         let config = Config::from_env_map(vars);
+        let source_slots = Self::fake_slots(primary, fallback, config.firecrawl_enabled);
         Self {
             cache: Arc::new(Mutex::new(SourceCache::new(256))),
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources: Some(primary),
-            fallback_sources: fallback,
+            source_slots,
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(router),
         }
@@ -542,8 +816,7 @@ impl SearchService {
                 self.config.enrich_concurrency,
                 self.config.enrich_max_chars,
                 self.config.max_inline_sources,
-                self.sources.clone(),
-                self.fallback_sources.clone(),
+                self.active_sources(),
             )
             .await
         } else {
@@ -577,11 +850,11 @@ impl SearchService {
         })
     }
 
-    /// Fetch sources from the primary source provider (or fall through to
-    /// firecrawl) without applying a path-specific provider label. The
-    /// returned Vec carries each provider's native label ("tavily"/"firecrawl");
-    /// the caller re-labels via `with_provider` once the path (enrichment vs
-    /// fallback) is known.
+    /// Fetch sources by walking the configured provider chain in order; the
+    /// first provider with usable results wins. No path-specific provider
+    /// label is applied here — the returned Vec carries each provider's
+    /// native label ("tavily"/"exa"/…); the caller re-labels via
+    /// `with_provider` once the path (enrichment vs fallback) is known.
     ///
     /// Every path that yields nothing records *why* in [`RawSources::notes`].
     /// Provider errors used to be swallowed outright, which left a request that
@@ -600,71 +873,64 @@ impl SearchService {
             )]);
         }
         let mut notes = Vec::new();
-        match &self.sources {
-            Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) => match usable_or_note("tavily", sources) {
-                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Primary),
-                    Err(note) => notes.push(note),
-                },
-                Err(err) => notes.push(SourceNote::broken(format!("tavily: {err}"))),
-            },
-            None => notes.push(unavailable_note(
-                "tavily",
-                self.config.tavily_enabled,
-                "TAVILY_ENABLED",
-                "TAVILY_API_KEY",
-                "x-tavily-api-key",
-            )),
-        }
-        // The fallback source provider (Firecrawl) ignores `SearchFilters`
-        // outright — it has no structured recency/domain support — so a
-        // filter-constrained request must never fall through: swapping
-        // constrained Tavily results for unconstrained Firecrawl ones would
-        // silently violate the include/exclude/recency contract. Constrained
-        // requests are Tavily-or-nothing.
-        if !filters.is_empty() {
-            const SKIPPED: &str =
-                "skipped (request carries domain/recency filters, which firecrawl cannot honor)";
-            // Whether the gate is the *only* thing in the way decides what to
-            // advise. A configured Firecrawl really would have answered, so
-            // dropping the filters is a genuine remedy and this is an honest
-            // empty outcome. An absent one changes nothing when the filters go,
-            // so recording that as a healthy no-match would promise a remedy
-            // that cannot work — while hiding the configuration problem behind
-            // it.
-            notes.push(match &self.fallback_sources {
-                Some(_) => SourceNote::no_results(format!("firecrawl: {SKIPPED}")),
-                None => {
-                    let unavailable = unavailable_note(
-                        "firecrawl",
-                        self.config.firecrawl_enabled,
-                        "FIRECRAWL_ENABLED",
-                        "FIRECRAWL_API_KEY",
-                        "x-firecrawl-api-key",
-                    );
-                    SourceNote::new(
-                        unavailable.kind,
-                        format!("{} — also {SKIPPED}", unavailable.detail),
-                    )
+        for slot in self.source_slots.iter() {
+            match slot {
+                SourceSlot::Active(entry) => {
+                    let name = entry.spec.name;
+                    // A provider that ignores `SearchFilters` (Firecrawl) must
+                    // never serve a filter-constrained request: swapping
+                    // constrained results for unconstrained ones would
+                    // silently violate the include/exclude/recency contract.
+                    // Filtered requests are filter-capable-providers-or-nothing.
+                    if !filters.is_empty() && !entry.spec.supports_filters {
+                        notes.push(SourceNote::no_results(format!(
+                            "{name}: skipped (request carries domain/recency filters, which {name} cannot honor)"
+                        )));
+                        continue;
+                    }
+                    match entry.provider.search_sources(query, count, filters).await {
+                        Ok(sources) => match usable_or_note(name, sources) {
+                            Ok(usable) => {
+                                if !notes.is_empty() {
+                                    eprintln!(
+                                        "grok-search-rs: source chain fell through to {name} ({})",
+                                        source_diagnosis(&notes)
+                                    );
+                                }
+                                return RawSources::found(usable, Some(name));
+                            }
+                            Err(note) => notes.push(note),
+                        },
+                        Err(err) => notes.push(SourceNote::broken(format!("{name}: {err}"))),
+                    }
                 }
-            });
-            return RawSources::empty(notes);
-        }
-        match &self.fallback_sources {
-            Some(provider) => match provider.search_sources(query, count, filters).await {
-                Ok(sources) => match usable_or_note("firecrawl", sources) {
-                    Ok(usable) => return RawSources::found(usable, RawSourceOrigin::Fallback),
-                    Err(note) => notes.push(note),
-                },
-                Err(err) => notes.push(SourceNote::broken(format!("firecrawl: {err}"))),
-            },
-            None => notes.push(unavailable_note(
-                "firecrawl",
-                self.config.firecrawl_enabled,
-                "FIRECRAWL_ENABLED",
-                "FIRECRAWL_API_KEY",
-                "x-firecrawl-api-key",
-            )),
+                SourceSlot::Missing { spec, enabled } => {
+                    let unavailable = unavailable_note(
+                        spec.name,
+                        *enabled,
+                        spec.enable_var,
+                        spec.key_var,
+                        spec.header,
+                    );
+                    // For a filter-blind provider, whether the gate is the
+                    // *only* thing in the way decides what to advise. A
+                    // configured Firecrawl really would have answered, so
+                    // dropping the filters is a genuine remedy; an absent one
+                    // changes nothing when the filters go, so the note names
+                    // both problems instead of hiding the config one.
+                    notes.push(if !filters.is_empty() && !spec.supports_filters {
+                        SourceNote::new(
+                            unavailable.kind,
+                            format!(
+                                "{} — also skipped (request carries domain/recency filters, which {} cannot honor)",
+                                unavailable.detail, spec.name
+                            ),
+                        )
+                    } else {
+                        unavailable
+                    });
+                }
+            }
         }
         RawSources::empty(notes)
     }
@@ -749,8 +1015,7 @@ impl SearchService {
                 self.config.enrich_concurrency,
                 self.config.enrich_max_chars,
                 self.config.max_inline_sources,
-                self.sources.clone(),
-                self.fallback_sources.clone(),
+                self.active_sources(),
             )
             .await
         } else {
@@ -878,17 +1143,24 @@ impl SearchService {
     }
 
     async fn web_fetch_raw(&self, url: &str) -> Result<String> {
-        generic_source_fetch(&self.sources, &self.fallback_sources, url)
+        generic_source_fetch(&self.active_sources(), url)
             .await
             .map(|page| page.content)
     }
 
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
-        self.sources
-            .as_ref()
-            .ok_or(GrokSearchError::MissingConfig("TAVILY_API_KEY"))?
-            .map(url, max_results)
-            .await
+        // Only providers with a real site-map endpoint qualify (Tavily today);
+        // the search-shaped `map` impls on the other providers are not a
+        // substitute for actual URL discovery.
+        let entry = self
+            .source_slots
+            .iter()
+            .find_map(|slot| match slot {
+                SourceSlot::Active(entry) if entry.spec.supports_map => Some(entry.clone()),
+                _ => None,
+            })
+            .ok_or(GrokSearchError::MissingConfig("TAVILY_API_KEY"))?;
+        entry.provider.map(url, max_results).await
     }
 
     /// Runtime diagnostics with live connectivity probes against each configured backend.
@@ -896,14 +1168,18 @@ impl SearchService {
     pub async fn doctor(&self) -> serde_json::Value {
         use crate::config::Transport;
         let grok_probe = self.probe_grok().await;
-        let tavily_probe = match &self.sources {
-            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
-            None => Probe::skipped("TAVILY_API_KEY not configured"),
-        };
-        let firecrawl_probe = match &self.fallback_sources {
-            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
-            None => Probe::skipped("FIRECRAWL_API_KEY not configured"),
-        };
+        let tavily_probe = self.probe_chain_source("tavily").await;
+        let exa_probe = self.probe_chain_source("exa").await;
+        let tinyfish_probe = self.probe_chain_source("tinyfish").await;
+        let firecrawl_probe = self.probe_chain_source("firecrawl").await;
+        let source_chain: Vec<&str> = self
+            .source_slots
+            .iter()
+            .filter_map(|slot| match slot {
+                SourceSlot::Active(entry) => Some(entry.spec.name),
+                SourceSlot::Missing { .. } => None,
+            })
+            .collect();
 
         // Surface the AI transport that the service actually dispatches to so
         // doctor() stays truthful when callers point us at an OpenAI-compatible
@@ -957,12 +1233,26 @@ impl SearchService {
                 "reachable": tavily_probe.ok,
                 "detail": tavily_probe.detail,
             },
+            "exa": {
+                "api_url": self.config.exa_api_url,
+                "enabled": self.config.exa_enabled,
+                "reachable": exa_probe.ok,
+                "detail": exa_probe.detail,
+            },
+            "tinyfish": {
+                "search_api_url": self.config.tinyfish_search_api_url,
+                "fetch_api_url": self.config.tinyfish_fetch_api_url,
+                "enabled": self.config.tinyfish_enabled,
+                "reachable": tinyfish_probe.ok,
+                "detail": tinyfish_probe.detail,
+            },
             "firecrawl": {
                 "api_url": self.config.firecrawl_api_url,
                 "enabled": self.config.firecrawl_enabled,
                 "reachable": firecrawl_probe.ok,
                 "detail": firecrawl_probe.detail,
             },
+            "source_chain": source_chain,
             "default_extra_sources": self.config.default_extra_sources,
             "fallback_sources": self.config.fallback_sources,
             "cache_size": self.config.cache_size,
@@ -970,6 +1260,26 @@ impl SearchService {
             "github_token": self.config.github_token_status(),
             "redacted": self.config.redacted_diagnostics()
         })
+    }
+
+    /// Probe one chain provider by name: live search for an active slot, a
+    /// skip marker naming the missing key otherwise.
+    async fn probe_chain_source(&self, name: &str) -> Probe {
+        let active = self.source_slots.iter().find_map(|slot| match slot {
+            SourceSlot::Active(entry) if entry.spec.name == name => Some(entry.clone()),
+            _ => None,
+        });
+        match active {
+            Some(entry) => probe_source(entry.provider.as_ref(), "https://example.com").await,
+            None => {
+                let key_var = CANONICAL_SOURCE_ORDER
+                    .iter()
+                    .find(|spec| spec.name == name)
+                    .map(|spec| spec.key_var)
+                    .unwrap_or("API key");
+                Probe::skipped(format!("{key_var} not configured"))
+            }
+        }
     }
 
     async fn probe_grok(&self) -> Probe {
@@ -1045,26 +1355,19 @@ impl SearchService {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum RawSourceOrigin {
-    None,
-    Primary,
-    Fallback,
-}
-
-/// Outcome of the speculative source fan-out: the sources plus a per-provider
-/// account of what happened. `notes` stays empty on the happy path (a provider
-/// that returns results short-circuits before anything is recorded); it is
-/// populated only when a provider yields nothing, so a request that ends with
-/// zero sources can say why.
+/// Outcome of the speculative source fan-out: the sources, the name of the
+/// chain provider that served them (`None` when nothing answered), plus a
+/// per-provider account of what happened. `notes` stays empty on the
+/// first-provider happy path; earlier dead ends are recorded so a request
+/// that ends with zero sources can say why.
 struct RawSources {
     sources: Vec<Source>,
-    origin: RawSourceOrigin,
+    origin: Option<&'static str>,
     notes: Vec<SourceNote>,
 }
 
 impl RawSources {
-    fn found(sources: Vec<Source>, origin: RawSourceOrigin) -> Self {
+    fn found(sources: Vec<Source>, origin: Option<&'static str>) -> Self {
         Self {
             sources,
             origin,
@@ -1075,7 +1378,7 @@ impl RawSources {
     fn empty(notes: Vec<SourceNote>) -> Self {
         Self {
             sources: Vec::new(),
-            origin: RawSourceOrigin::None,
+            origin: None,
             notes,
         }
     }
@@ -1218,7 +1521,7 @@ fn fallback_remediation(notes: &[SourceNote]) -> String {
         // before asking for a remediation. Raising the budget would not
         // instantiate a switched-off provider, so it is not offered here.
         parts.push(
-            "A source provider is switched off; enable it (TAVILY_ENABLED / FIRECRAWL_ENABLED).",
+            "A source provider is switched off; enable it (TAVILY_ENABLED / EXA_ENABLED / TINYFISH_ENABLED / FIRECRAWL_ENABLED).",
         );
     }
     if has(NoteKind::Broken) {
@@ -1315,6 +1618,257 @@ mod remediation_tests {
     }
 }
 
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    fn http() -> reqwest::Client {
+        crate::providers::http::build_client(std::time::Duration::from_secs(5))
+    }
+
+    fn slot_names(slots: &[SourceSlot]) -> Vec<String> {
+        slots
+            .iter()
+            .map(|slot| match slot {
+                SourceSlot::Active(entry) => format!("active:{}", entry.spec.name),
+                SourceSlot::Missing { spec, .. } => format!("missing:{}", spec.name),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_chain_orders_all_configured_providers_canonically() {
+        let config = Config::from_env_map([
+            ("TAVILY_API_KEY", "t"),
+            ("EXA_API_KEY", "e"),
+            ("TINYFISH_API_KEY", "f"),
+            ("FIRECRAWL_API_KEY", "c"),
+        ]);
+        let slots = build_source_slots(&config, &http()).expect("slots");
+        assert_eq!(
+            slot_names(&slots),
+            [
+                "active:tavily",
+                "active:exa",
+                "active:tinyfish",
+                "active:firecrawl"
+            ]
+        );
+    }
+
+    // Core providers keep their historical place in zero-source diagnostics
+    // even when unconfigured; optional ones stay out unless named explicitly,
+    // so "I never set up Exa" cannot read as a broken credential.
+    #[test]
+    fn default_chain_slots_missing_core_but_omits_missing_optional() {
+        let config = Config::from_env_map([("TINYFISH_API_KEY", "f")]);
+        let slots = build_source_slots(&config, &http()).expect("slots");
+        assert_eq!(
+            slot_names(&slots),
+            ["missing:tavily", "active:tinyfish", "missing:firecrawl"]
+        );
+    }
+
+    #[test]
+    fn explicit_order_overrides_and_slots_every_named_provider() {
+        let config = Config::from_env_map([
+            ("TINYFISH_API_KEY", "f"),
+            ("GROK_SEARCH_SOURCE_PROVIDERS", "tinyfish, Exa"),
+        ]);
+        let slots = build_source_slots(&config, &http()).expect("slots");
+        assert_eq!(slot_names(&slots), ["active:tinyfish", "missing:exa"]);
+    }
+
+    #[test]
+    fn unknown_provider_name_fails_construction() {
+        let config = Config::from_env_map([("GROK_SEARCH_SOURCE_PROVIDERS", "tavily,serpapi")]);
+        let err = match build_source_slots(&config, &http()) {
+            Err(err) => err,
+            Ok(_) => panic!("must reject unknown provider name"),
+        };
+        assert!(err.to_string().contains("serpapi"), "{err}");
+    }
+
+    #[test]
+    fn labels_follow_the_serving_provider() {
+        assert_eq!(enrichment_label(Some("exa")), "exa_enrichment");
+        assert_eq!(fallback_label(Some("tinyfish")), "tinyfish_fallback");
+        assert_eq!(fallback_label(None), "tavily_fallback");
+    }
+
+    /// Search always answers with no results.
+    struct EmptySearchProvider;
+    #[async_trait]
+    impl SourceProvider for EmptySearchProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage::text(format!("empty provider fetch {url}")))
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Serves sources whose provider label is the provider's own name.
+    struct NamedSourceProvider(&'static str);
+    #[async_trait]
+    impl SourceProvider for NamedSourceProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            Ok((0..max_results)
+                .map(|idx| Source::new(format!("https://{}.example/{idx}", self.0), self.0))
+                .collect())
+        }
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage::text(format!("content from {}", self.0)))
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct ErrAiProvider;
+    #[async_trait]
+    impl AiProvider for ErrAiProvider {
+        async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+            Err(GrokSearchError::Provider("ai down".to_string()))
+        }
+    }
+
+    fn chain_service(slots: Vec<SourceSlot>, ai: Arc<dyn AiProvider>) -> SearchService {
+        let config = Config::from_env_map([("GROK_SEARCH_API_KEY", "fake")]);
+        SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai,
+            source_slots: Arc::new(slots),
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+            http_client: crate::providers::http::build_client(std::time::Duration::from_secs(5)),
+            source_router: Arc::new(crate::sources::SourceRouter::default()),
+        }
+    }
+
+    fn concise_input() -> WebSearchInput {
+        WebSearchInput {
+            query: "chain test".to_string(),
+            // Opt out of inline content so no real HTTP enrichment runs.
+            include_content: Some(false),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_falls_through_to_next_provider_and_labels_fallback_by_name() {
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(EmptySearchProvider),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &TINYFISH_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tinyfish")),
+                }),
+            ],
+            Arc::new(ErrAiProvider),
+        );
+        let out = svc
+            .web_search(concise_input())
+            .await
+            .expect("fallback output");
+        assert!(out.fallback_used);
+        assert!(!out.sources.is_empty());
+        assert!(
+            out.sources
+                .iter()
+                .all(|source| source.provider == "tinyfish_fallback"),
+            "expected tinyfish_fallback labels, got: {:?}",
+            out.sources
+                .iter()
+                .map(|source| source.provider.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_requests_skip_filter_blind_providers_but_use_capable_ones() {
+        // Firecrawl sits FIRST here yet must be skipped for a filtered
+        // request; TinyFish (filter-capable) serves instead.
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &FIRECRAWL_SPEC,
+                    provider: Arc::new(NamedSourceProvider("firecrawl")),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &TINYFISH_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tinyfish")),
+                }),
+            ],
+            Arc::new(ErrAiProvider),
+        );
+        let mut input = concise_input();
+        input.include_domains = vec!["example.com".to_string()];
+        let out = svc.web_search(input).await.expect("fallback output");
+        assert!(
+            out.sources
+                .iter()
+                .all(|source| source.provider == "tinyfish_fallback"),
+            "filter-blind firecrawl must not serve a filtered request: {:?}",
+            out.sources
+                .iter()
+                .map(|source| source.provider.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn enrichment_sources_carry_the_serving_providers_label() {
+        // Grok succeeds (FakeAiProvider is verifiable); the supplemental
+        // sources come from the second chain slot after the first is empty,
+        // and must be labeled {provider}_enrichment.
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(EmptySearchProvider),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &EXA_SPEC,
+                    provider: Arc::new(NamedSourceProvider("exa")),
+                }),
+            ],
+            Arc::new(FakeAiProvider),
+        );
+        let out = svc
+            .web_search(concise_input())
+            .await
+            .expect("search output");
+        assert!(!out.fallback_used);
+        assert!(
+            out.sources
+                .iter()
+                .any(|source| source.provider == "exa_enrichment"),
+            "expected exa_enrichment labels, got: {:?}",
+            out.sources
+                .iter()
+                .map(|source| source.provider.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 /// Pick the model the active transport actually understands. Responses speaks
 /// Grok-native model names (`grok_model`); the chat-completions gateway speaks
 /// whatever `OPENAI_COMPATIBLE_MODEL` declares, falling back to `grok_model`
@@ -1332,20 +1886,17 @@ fn resolve_default_model(config: &Config) -> String {
     }
 }
 
-fn enrichment_label(origin: RawSourceOrigin) -> &'static str {
-    match origin {
-        RawSourceOrigin::Primary => "tavily_enrichment",
-        RawSourceOrigin::Fallback => "firecrawl_enrichment",
-        RawSourceOrigin::None => "tavily_enrichment",
-    }
+/// Per-source label for the enrichment path: the serving chain provider's
+/// name plus an `_enrichment` suffix ("tavily_enrichment", "exa_enrichment",
+/// …). `None` (nothing served) keeps the historical "tavily" default, though
+/// it only ever labels an empty list.
+fn enrichment_label(origin: Option<&'static str>) -> String {
+    format!("{}_enrichment", origin.unwrap_or("tavily"))
 }
 
-fn fallback_label(origin: RawSourceOrigin) -> &'static str {
-    match origin {
-        RawSourceOrigin::Primary => "tavily_fallback",
-        RawSourceOrigin::Fallback => "firecrawl_fallback",
-        RawSourceOrigin::None => "tavily_fallback",
-    }
+/// Per-source label for the degraded path, `{provider}_fallback` (#30).
+fn fallback_label(origin: Option<&'static str>) -> String {
+    format!("{}_fallback", origin.unwrap_or("tavily"))
 }
 
 /// Maps a failed Grok call to a stable `fallback_reason` identifier. Kept at
@@ -1425,30 +1976,29 @@ fn apply_fetch_limit(
     }
 }
 
-/// Generic (non-specialist) content fetch via the configured source providers:
-/// primary (Tavily) first, then fallback (Firecrawl). Shared by `web_fetch` and
-/// inline enrichment so both agree on how an ordinary URL is retrieved once no
-/// specialist extractor matches. Returns `MissingConfig` only when neither
-/// provider is configured; a configured primary that fails or yields empty
-/// content with no fallback surfaces its real error instead, so users are not
-/// sent to debug config that is actually set.
-async fn generic_source_fetch(
-    primary: &Option<Arc<dyn SourceProvider>>,
-    fallback: &Option<Arc<dyn SourceProvider>>,
-    url: &str,
-) -> Result<FetchedPage> {
-    let primary_err = match primary {
-        Some(provider) => match provider.fetch(url).await {
+/// Generic (non-specialist) content fetch via the configured source-provider
+/// chain, first non-empty page wins. Shared by `web_fetch` and inline
+/// enrichment so both agree on how an ordinary URL is retrieved once no
+/// specialist extractor matches. Returns `MissingConfig` only when no
+/// provider is configured at all; otherwise the last attempt's real error
+/// surfaces, so users are not sent to debug config that is actually set.
+async fn generic_source_fetch(chain: &[SourceEntry], url: &str) -> Result<FetchedPage> {
+    let mut last_error: Option<GrokSearchError> = None;
+    for entry in chain {
+        match entry.provider.fetch(url).await {
             Ok(page) if !page.content.trim().is_empty() => return Ok(page),
-            Ok(_) => GrokSearchError::Provider(format!("Tavily returned empty content for {url}")),
-            Err(err) => err,
-        },
-        None => GrokSearchError::MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY"),
-    };
-    match fallback {
-        Some(provider) => provider.fetch(url).await,
-        None => Err(primary_err),
+            Ok(_) => {
+                last_error = Some(GrokSearchError::Provider(format!(
+                    "{} returned empty content for {url}",
+                    entry.spec.display
+                )))
+            }
+            Err(err) => last_error = Some(err),
+        }
     }
+    Err(last_error.unwrap_or(GrokSearchError::MissingConfig(
+        "TAVILY_API_KEY, EXA_API_KEY, TINYFISH_API_KEY or FIRECRAWL_API_KEY",
+    )))
 }
 
 /// One enrichment outcome: the content to store plus any metadata backfill
@@ -1543,8 +2093,7 @@ async fn enrich_sources(
     concurrency: usize,
     max_chars: usize,
     max_sources: usize,
-    primary: Option<Arc<dyn SourceProvider>>,
-    fallback: Option<Arc<dyn SourceProvider>>,
+    chain: Vec<SourceEntry>,
 ) -> Vec<Source> {
     let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut set: tokio::task::JoinSet<(usize, EnrichedFetch)> = tokio::task::JoinSet::new();
@@ -1555,8 +2104,7 @@ async fn enrich_sources(
         let client = client.clone();
         let router = Arc::clone(router);
         let caps = caps.clone();
-        let primary = primary.clone();
-        let fallback = fallback.clone();
+        let chain = chain.clone();
 
         set.spawn(async move {
             // acquire is micro-second scale for concurrency<=5; deadline
@@ -1579,7 +2127,7 @@ async fn enrich_sources(
                         // specialist-failure fallback). The original `reason` is
                         // surfaced only if the generic fetch also fails.
                         Ok(Err(reason)) => {
-                            let generic = generic_source_fetch(&primary, &fallback, &url_str);
+                            let generic = generic_source_fetch(&chain, &url_str);
                             match tokio::time::timeout_at(deadline, generic).await {
                                 Ok(Ok(page)) => EnrichedFetch::from_page(page, max_chars),
                                 Ok(Err(_)) => EnrichedFetch::note(format!(
@@ -1901,8 +2449,7 @@ mod transport_dispatch_tests {
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources: None,
-            fallback_sources: None,
+            source_slots: Arc::new(Vec::new()),
             cache: Arc::new(Mutex::new(SourceCache::new(16))),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
@@ -1928,8 +2475,7 @@ mod transport_dispatch_tests {
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources: None,
-            fallback_sources: None,
+            source_slots: Arc::new(Vec::new()),
             cache: Arc::new(Mutex::new(SourceCache::new(16))),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
@@ -1951,8 +2497,7 @@ mod transport_dispatch_tests {
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources: None,
-            fallback_sources: None,
+            source_slots: Arc::new(Vec::new()),
             cache: Arc::new(Mutex::new(SourceCache::new(16))),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
@@ -1971,8 +2516,7 @@ mod transport_dispatch_tests {
             default_model: resolve_default_model(&config_unset),
             config: config_unset,
             ai: Arc::new(FakeAiProvider),
-            sources: None,
-            fallback_sources: None,
+            source_slots: Arc::new(Vec::new()),
             cache: Arc::new(Mutex::new(SourceCache::new(16))),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(crate::sources::SourceRouter::default()),
@@ -2153,12 +2697,19 @@ mod enrich_tests {
         router: SourceRouter,
         sources: Option<Arc<dyn SourceProvider>>,
     ) -> SearchService {
+        let source_slots = sources
+            .map(|provider| {
+                vec![SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider,
+                })]
+            })
+            .unwrap_or_default();
         SearchService {
             default_model: resolve_default_model(&config),
             config,
             ai: Arc::new(FakeAiProvider),
-            sources,
-            fallback_sources: None,
+            source_slots: Arc::new(source_slots),
             cache: Arc::new(Mutex::new(SourceCache::new(64))),
             http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
             source_router: Arc::new(router),
@@ -2358,13 +2909,15 @@ mod enrich_tests {
 
     #[tokio::test]
     async fn generic_fetch_missing_config_only_when_no_provider_configured() {
-        let err = generic_source_fetch(&None, &None, "https://example.com")
+        let err = generic_source_fetch(&[], "https://example.com")
             .await
             .expect_err("no providers must error");
         assert!(
             matches!(
                 err,
-                GrokSearchError::MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY")
+                GrokSearchError::MissingConfig(
+                    "TAVILY_API_KEY, EXA_API_KEY, TINYFISH_API_KEY or FIRECRAWL_API_KEY"
+                )
             ),
             "expected MissingConfig, got: {err:?}"
         );
@@ -2376,8 +2929,11 @@ mod enrich_tests {
         // through to MissingConfig("TAVILY_API_KEY or FIRECRAWL_API_KEY") even
         // though TAVILY_API_KEY was set, sending users to debug config instead
         // of the actual provider failure.
-        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(SearchOkFetchErrProvider));
-        let err = generic_source_fetch(&primary, &None, "https://example.com")
+        let chain = vec![SourceEntry {
+            spec: &TAVILY_SPEC,
+            provider: Arc::new(SearchOkFetchErrProvider),
+        }];
+        let err = generic_source_fetch(&chain, "https://example.com")
             .await
             .expect_err("primary failure must error");
         match err {
@@ -2389,8 +2945,11 @@ mod enrich_tests {
     #[tokio::test]
     async fn generic_fetch_primary_empty_content_reports_empty_without_fallback() {
         let url = "https://npmjs.com/package/grok-search-rs";
-        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(EmptyFetchProvider));
-        let err = generic_source_fetch(&primary, &None, url)
+        let chain = vec![SourceEntry {
+            spec: &TAVILY_SPEC,
+            provider: Arc::new(EmptyFetchProvider),
+        }];
+        let err = generic_source_fetch(&chain, url)
             .await
             .expect_err("empty content must error");
         match err {
@@ -2404,9 +2963,17 @@ mod enrich_tests {
 
     #[tokio::test]
     async fn generic_fetch_primary_failure_still_rescued_by_fallback() {
-        let primary: Option<Arc<dyn SourceProvider>> = Some(Arc::new(SearchOkFetchErrProvider));
-        let fallback: Option<Arc<dyn SourceProvider>> = Some(Arc::new(FakeSourceProvider));
-        let page = generic_source_fetch(&primary, &fallback, "https://example.com")
+        let chain = vec![
+            SourceEntry {
+                spec: &TAVILY_SPEC,
+                provider: Arc::new(SearchOkFetchErrProvider),
+            },
+            SourceEntry {
+                spec: &FIRECRAWL_SPEC,
+                provider: Arc::new(FakeSourceProvider),
+            },
+        ];
+        let page = generic_source_fetch(&chain, "https://example.com")
             .await
             .expect("fallback must rescue primary failure");
         assert!(
@@ -2565,6 +3132,14 @@ mod enrich_tests {
         primary: Option<Arc<dyn SourceProvider>>,
         max_sources: usize,
     ) -> Vec<Source> {
+        let chain = primary
+            .map(|provider| {
+                vec![SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider,
+                }]
+            })
+            .unwrap_or_default();
         enrich_sources(
             sources,
             tokio::time::Instant::now() + Duration::from_secs(30),
@@ -2577,8 +3152,7 @@ mod enrich_tests {
             4,
             15_000,
             max_sources,
-            primary,
-            None,
+            chain,
         )
         .await
     }
