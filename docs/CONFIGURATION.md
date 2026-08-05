@@ -144,7 +144,7 @@ Free Search & Fetch APIs built for agents (no credits consumed; rate limits appl
 | `TINYFISH_FETCH_API_URL` | `https://api.fetch.tinyfish.ai` | Fetch endpoint (POST). |
 | `TINYFISH_ENABLED` | `true` | Optional override. Set to `false` to disable TinyFish even if a key is configured. |
 
-Domain filters are honored via `site:` / `-site:` query operators; `recency_days` maps to TinyFish's `recency_minutes`.
+Domain filters map to TinyFish's dedicated `include_domains` / `exclude_domains` parameters (the `site:` / `-site:` query operators are deprecated upstream for domain filtering because they collide with other query syntax); `recency_days` maps to `recency_minutes`.
 
 ## Exa
 

@@ -1,6 +1,6 @@
 use grok_search_rs::model::search::SearchFilters;
 use grok_search_rs::providers::tinyfish::{
-    normalize_tinyfish_results, parse_tinyfish_fetch, tinyfish_search_query,
+    normalize_tinyfish_results, parse_tinyfish_fetch, tinyfish_search_params,
 };
 use serde_json::json;
 
@@ -42,31 +42,43 @@ fn search_results_parse_title_snippet_url_and_date() {
     assert_eq!(sources[1].published_date.as_deref(), Some("2026-07-30"));
 }
 
+// Domain filters ride the dedicated comma-separated params, never the query
+// string: `site:`/`-site:` operators are deprecated for domain filtering
+// upstream because they collide with other query syntax, and the caller's
+// query is arbitrary user text.
 #[test]
-fn query_carries_domain_filters_as_site_operators() {
+fn domain_filters_use_dedicated_params_and_leave_the_query_untouched() {
     let filters = SearchFilters {
         recency_days: None,
         include_domains: vec!["docs.rs".to_string(), "crates.io".to_string()],
         exclude_domains: vec!["pinterest.com".to_string()],
     };
-    let params = tinyfish_search_query("rust http client", &filters);
-    assert_eq!(params.len(), 1);
-    assert_eq!(params[0].0, "query");
+    let params = tinyfish_search_params("rust http client", &filters);
     assert_eq!(
-        params[0].1,
-        "rust http client (site:docs.rs OR site:crates.io) -site:pinterest.com"
+        params,
+        vec![
+            ("query", "rust http client".to_string()),
+            ("include_domains", "docs.rs,crates.io".to_string()),
+            ("exclude_domains", "pinterest.com".to_string()),
+        ]
     );
 }
 
+// A query carrying operator-like syntax of its own must survive verbatim —
+// the old string-splicing path could turn it into a different query.
 #[test]
-fn single_include_domain_needs_no_group() {
+fn operator_like_query_text_is_not_rewritten() {
     let filters = SearchFilters {
         recency_days: None,
         include_domains: vec!["github.com".to_string()],
         exclude_domains: Vec::new(),
     };
-    let params = tinyfish_search_query("grok-search-rs", &filters);
-    assert_eq!(params[0].1, "grok-search-rs site:github.com");
+    let params = tinyfish_search_params("rust OR go site:example.com", &filters);
+    assert_eq!(
+        params[0],
+        ("query", "rust OR go site:example.com".to_string())
+    );
+    assert_eq!(params[1], ("include_domains", "github.com".to_string()));
 }
 
 #[test]
@@ -76,7 +88,7 @@ fn recency_days_map_to_minutes_with_ten_year_cap() {
         include_domains: Vec::new(),
         exclude_domains: Vec::new(),
     };
-    let params = tinyfish_search_query("q", &week);
+    let params = tinyfish_search_params("q", &week);
     assert_eq!(params[1], ("recency_minutes", (7 * 24 * 60).to_string()));
 
     let huge = SearchFilters {
@@ -84,13 +96,13 @@ fn recency_days_map_to_minutes_with_ten_year_cap() {
         include_domains: Vec::new(),
         exclude_domains: Vec::new(),
     };
-    let params = tinyfish_search_query("q", &huge);
+    let params = tinyfish_search_params("q", &huge);
     assert_eq!(params[1], ("recency_minutes", "5256000".to_string()));
 }
 
 #[test]
 fn unfiltered_query_sends_only_the_query_param() {
-    let params = tinyfish_search_query("plain", &SearchFilters::default());
+    let params = tinyfish_search_params("plain", &SearchFilters::default());
     assert_eq!(params, vec![("query", "plain".to_string())]);
 }
 

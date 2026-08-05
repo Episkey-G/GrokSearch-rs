@@ -68,7 +68,7 @@ impl TinyfishProvider {
         let raw = get_json_with_header_auth(
             &self.client,
             &self.search_api_url,
-            &tinyfish_search_query(query, filters),
+            &tinyfish_search_params(query, filters),
             (AUTH_HEADER, &self.api_key),
             "TinyFish",
         )
@@ -93,32 +93,20 @@ impl TinyfishProvider {
     }
 }
 
-/// Build the GET query parameters. TinyFish has no structured domain
-/// parameters — domain scoping rides inside the query string as `site:` /
-/// `-site:` search operators (the documented mechanism) — while recency maps
-/// onto `recency_minutes`.
-pub fn tinyfish_search_query(query: &str, filters: &SearchFilters) -> Vec<(&'static str, String)> {
-    let mut composed = query.to_string();
-    match filters.include_domains.as_slice() {
-        [] => {}
-        [single] => {
-            composed.push_str(" site:");
-            composed.push_str(single);
-        }
-        many => {
-            let group = many
-                .iter()
-                .map(|domain| format!("site:{domain}"))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            composed.push_str(&format!(" ({group})"));
-        }
+/// Build the GET query parameters. Domain scoping uses TinyFish's dedicated
+/// comma-separated `include_domains` / `exclude_domains` parameters: the
+/// `site:` / `-site:` query operators still work but are documented as
+/// deprecated for domain filtering precisely because they collide with other
+/// query syntax — and the caller's query is arbitrary user text, so it can
+/// carry that syntax. Recency maps onto `recency_minutes`.
+pub fn tinyfish_search_params(query: &str, filters: &SearchFilters) -> Vec<(&'static str, String)> {
+    let mut params = vec![("query", query.to_string())];
+    if !filters.include_domains.is_empty() {
+        params.push(("include_domains", filters.include_domains.join(",")));
     }
-    for domain in &filters.exclude_domains {
-        composed.push_str(" -site:");
-        composed.push_str(domain);
+    if !filters.exclude_domains.is_empty() {
+        params.push(("exclude_domains", filters.exclude_domains.join(",")));
     }
-    let mut params = vec![("query", composed)];
     if let Some(days) = filters.recency_days {
         let minutes = u64::from(days)
             .saturating_mul(24 * 60)

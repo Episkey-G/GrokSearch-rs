@@ -15,8 +15,9 @@ All notable changes to GrokSearch-rs are documented here.
   - **TinyFish**(closes #12):免费 Search & Fetch(不耗 credits,免费档限速
     30 req/min),`TINYFISH_API_KEY` 一把 key 同时驱动
     `api.search.tinyfish.ai`(GET)与 `api.fetch.tinyfish.ai`(POST,JS 渲染 +
-    PDF 抽取)。domain 过滤经 `site:`/`-site:` 操作符注入 query,
-    `recency_days` 映射为 `recency_minutes`。
+    PDF 抽取)。domain 过滤走官方专用参数 `include_domains`/`exclude_domains`
+    (`site:`/`-site:` 操作符上游已标记为 domain filtering 的 deprecated 路径,
+    会与用户 query 自带语法冲突),`recency_days` 映射为 `recency_minutes`。
   - **Exa**:语义(embeddings-first)检索,原生支持
     `includeDomains`/`excludeDomains`/`startPublishedDate`,fetch 走
     `/contents`。按量计费,适合描述式查询、论文与官方域名发现。

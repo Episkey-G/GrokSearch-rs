@@ -250,12 +250,12 @@ fn tools_list() -> Value {
                         "include_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Only return supplemental results from these domains. Tavily/Exa honor strictly, TinyFish via site: operators; filter-blind providers are skipped. Grok receives as soft preference."
+                            "description": "Only return supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft preference."
                         },
                         "exclude_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Suppress supplemental results from these domains. Tavily/Exa honor strictly, TinyFish via -site: operators; filter-blind providers are skipped. Grok receives as soft instruction."
+                            "description": "Suppress supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft instruction."
                         },
                         "include_content": {
                             "type": "boolean",
