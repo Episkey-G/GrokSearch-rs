@@ -2,7 +2,7 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
-## Unreleased
+## 0.1.24 - 2026-08-05
 
 ### Added
 
@@ -39,7 +39,7 @@ All notable changes to GrokSearch-rs are documented here.
   - HTTP 模式在 bind 监听端口**之前**校验 `GROK_SEARCH_SOURCE_PROVIDERS`,
     非法名不会变成"进程起来了但每个请求都失败"。
 
-
+## 0.1.23 - 2026-08-01
 
 ### Added
 
