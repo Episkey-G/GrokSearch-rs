@@ -26,9 +26,11 @@ Both carry the **same configuration values** — only the delivery differs. Ever
 | Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
 | Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
 | Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
+| TinyFish API key | `TINYFISH_API_KEY` | `X-Tinyfish-Api-Key` |
+| Exa API key | `EXA_API_KEY` | `X-Exa-Api-Key` |
 | GitHub token | `GITHUB_TOKEN` | `X-GitHub-Token` |
 
-Only these six are accepted as headers — the caller's per-request secrets plus the gateway/model that pair with the caller's key. Most other settings here (timeouts, budgets, enrichment knobs, Tavily/Firecrawl base URLs, feature toggles) are **operator-fixed**: set once in the server's own environment, never per request. `GROK_SEARCH_URL` / `GROK_SEARCH_MODEL` have operator defaults too; the `X-Grok-Base-Url` / `X-Grok-Model` headers override them per request. **Two groups are stdio-only — stripped over HTTP, not operator-fixed:** OAuth (`GROK_SEARCH_AUTH_MODE` / `GROK_SEARCH_AUTH_FILE`) and the OpenAI-compatible chat-completions transport (`OPENAI_COMPATIBLE_API_URL` / `_API_KEY` / `_MODEL`). The remote server serves Grok **Responses** only; to run a chat-completions relay, use the stdio transport.
+Only these eight are accepted as headers — the caller's per-request secrets plus the gateway/model that pair with the caller's key. Most other settings here (timeouts, budgets, enrichment knobs, Tavily/Firecrawl base URLs, feature toggles) are **operator-fixed**: set once in the server's own environment, never per request. `GROK_SEARCH_URL` / `GROK_SEARCH_MODEL` have operator defaults too; the `X-Grok-Base-Url` / `X-Grok-Model` headers override them per request. **Two groups are stdio-only — stripped over HTTP, not operator-fixed:** OAuth (`GROK_SEARCH_AUTH_MODE` / `GROK_SEARCH_AUTH_FILE`) and the OpenAI-compatible chat-completions transport (`OPENAI_COMPATIBLE_API_URL` / `_API_KEY` / `_MODEL`). The remote server serves Grok **Responses** only; to run a chat-completions relay, use the stdio transport.
 
 The header is `X-` + the env key in `Kebab-Case`, but a few names are historical (the `GROK_SEARCH_` prefix collapses to `X-Grok-`, and `GROK_SEARCH_URL` → `X-Grok-Base-Url`) — **read names off the table above rather than deriving them by hand.**
 
@@ -120,7 +122,7 @@ GROK_SEARCH_WEB_SEARCH = "true"
 | `TAVILY_API_KEY` | unset | Enables Tavily-backed source enrichment, fallback, fetch, and map. Accepts a single key or a comma-separated list (`tvly-a,tvly-b`); multiple keys rotate round-robin per request, with automatic failover to the next key on key-scoped errors (HTTP 401/403/429/432/433). |
 | `TAVILY_API_URL` | `https://api.tavily.com` | Tavily API base URL. |
 | `TAVILY_ENABLED` | `true` | Optional override. Set to `false` only when you want to disable Tavily even if `TAVILY_API_KEY` is configured. |
-| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Adds Tavily enrichment sources after a verifiable Grok result; Firecrawl can fallback if Tavily returns none. Set `0` to disable enrichment. |
+| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Adds enrichment sources after a verifiable Grok result, served by the first source-chain provider with results. Set `0` to disable enrichment. |
 | `GROK_SEARCH_FALLBACK_SOURCES` | `5` | Number of fallback sources to cache when Grok is unverifiable. |
 
 ## Firecrawl
@@ -130,6 +132,39 @@ GROK_SEARCH_WEB_SEARCH = "true"
 | `FIRECRAWL_API_KEY` | unset | Enables Firecrawl fallback for `web_fetch` and supplemental fallback sources. |
 | `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl API base URL, normalized to `/v1`. |
 | `FIRECRAWL_ENABLED` | `true` | Optional override. Set to `false` to disable Firecrawl even if a key is configured. |
+
+## TinyFish
+
+Free Search & Fetch APIs built for agents (no credits consumed; rate limits apply — 30 req/min on the free plan, and the account still needs Search API access). Search results are keyword-ranked with structured titles/snippets; fetch renders JS-heavy pages and extracts PDFs.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TINYFISH_API_KEY` | unset | Enables TinyFish in the source chain (supplemental sources + generic fetch). One key serves both endpoints. |
+| `TINYFISH_SEARCH_API_URL` | `https://api.search.tinyfish.ai` | Search endpoint (GET). |
+| `TINYFISH_FETCH_API_URL` | `https://api.fetch.tinyfish.ai` | Fetch endpoint (POST). |
+| `TINYFISH_ENABLED` | `true` | Optional override. Set to `false` to disable TinyFish even if a key is configured. |
+
+Domain filters map to TinyFish's dedicated `include_domains` / `exclude_domains` parameters (the `site:` / `-site:` query operators are deprecated upstream for domain filtering because they collide with other query syntax); `recency_days` maps to `recency_minutes`.
+
+## Exa
+
+Semantic (embeddings-first) search with native `includeDomains` / `excludeDomains` / published-date filtering — strong on descriptive queries, papers, and official-domain discovery. Paid per request.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EXA_API_KEY` | unset | Enables Exa in the source chain (supplemental sources + `/contents` fetch). |
+| `EXA_API_URL` | `https://api.exa.ai` | Exa API base URL. |
+| `EXA_ENABLED` | `true` | Optional override. Set to `false` to disable Exa even if a key is configured. |
+
+## Source chain
+
+Supplemental sources and generic (non-specialist) fetch walk an ordered provider chain; the first provider with usable output wins and later ones are pure fallback. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests. The whole chain shares one request deadline (`GROK_SEARCH_TIMEOUT_SECONDS`) — a slow provider cannot multiply the budget by the chain length.
+
+`web_map` is a separate capability, not part of this chain: it always uses Tavily whenever `TAVILY_API_KEY` is configured, even when the chain excludes Tavily.
+
+| Variable | Default | Description |
+|---|---|---|
+| `GROK_SEARCH_SOURCE_PROVIDERS` | unset | Comma-separated explicit chain order, e.g. `tinyfish,tavily,firecrawl` (valid names: `tavily`, `exa`, `tinyfish`, `firecrawl`). Unset = configured providers in canonical order `tavily, exa, tinyfish, firecrawl`. Unknown names fail at startup. |
 
 ## Cache
 
@@ -206,6 +241,14 @@ Unknown keys are rejected by the loader — typos surface as parse errors instea
 | `firecrawl_api_url` | `FIRECRAWL_API_URL` |
 | `firecrawl_api_key` | `FIRECRAWL_API_KEY` |
 | `firecrawl_enabled` | `FIRECRAWL_ENABLED` |
+| `tinyfish_search_api_url` | `TINYFISH_SEARCH_API_URL` |
+| `tinyfish_fetch_api_url` | `TINYFISH_FETCH_API_URL` |
+| `tinyfish_api_key` | `TINYFISH_API_KEY` |
+| `tinyfish_enabled` | `TINYFISH_ENABLED` |
+| `exa_api_url` | `EXA_API_URL` |
+| `exa_api_key` | `EXA_API_KEY` |
+| `exa_enabled` | `EXA_ENABLED` |
+| `source_providers` | `GROK_SEARCH_SOURCE_PROVIDERS` |
 | `default_extra_sources` | `GROK_SEARCH_EXTRA_SOURCES` |
 | `fallback_sources` | `GROK_SEARCH_FALLBACK_SOURCES` |
 | `fetch_max_chars` | `GROK_SEARCH_FETCH_MAX_CHARS` |

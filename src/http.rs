@@ -4,7 +4,8 @@
 //! `POST /mcp` endpoint, but multi-tenant: the server process holds **no**
 //! credentials. Each request carries the caller's own API keys in headers
 //! (`X-Grok-Api-Key` / `X-Tavily-Api-Key` / `X-Firecrawl-Api-Key` /
-//! `X-GitHub-Token`); a fully-credentialed [`SearchService`] is built per
+//! `X-Tinyfish-Api-Key` / `X-Exa-Api-Key` / `X-GitHub-Token`); a
+//! fully-credentialed [`SearchService`] is built per
 //! request via [`SearchService::for_request`], reusing one shared HTTP client
 //! and one process-wide source cache (so `get_sources` continuation still
 //! works across requests). The whole module is gated behind the `http` feature
@@ -57,6 +58,8 @@ const SECRET_ENV_KEYS: &[&str] = &[
     "GROK_SEARCH_API_KEY",
     "TAVILY_API_KEY",
     "FIRECRAWL_API_KEY",
+    "TINYFISH_API_KEY",
+    "EXA_API_KEY",
     "GITHUB_TOKEN",
     "OPENAI_COMPATIBLE_API_KEY",
     "OPENAI_COMPATIBLE_API_URL",
@@ -71,6 +74,8 @@ const HEADER_TO_ENV: &[(&str, &str)] = &[
     ("x-grok-api-key", "GROK_SEARCH_API_KEY"),
     ("x-tavily-api-key", "TAVILY_API_KEY"),
     ("x-firecrawl-api-key", "FIRECRAWL_API_KEY"),
+    ("x-tinyfish-api-key", "TINYFISH_API_KEY"),
+    ("x-exa-api-key", "EXA_API_KEY"),
     ("x-github-token", "GITHUB_TOKEN"),
     // Non-secret: lets a caller pick the Grok model per request (pairs with
     // X-Grok-Base-Url, since model names are gateway-specific). Absent header
@@ -105,6 +110,11 @@ struct AppState {
 pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> anyhow::Result<()> {
     // Operator (non-secret) config drives the shared client + cache sizing.
     let operator_cfg = Config::from_env_map(base_env.clone());
+    // Fail before binding on a bad GROK_SEARCH_SOURCE_PROVIDERS: the chain is
+    // operator-fixed (never a request header), and deferring the error to
+    // per-request service construction would leave a listener up that rejects
+    // every call.
+    crate::service::validate_source_providers(&operator_cfg)?;
     // Restricted client: rejects redirects to non-public IP-literal targets.
     let http_client = crate::providers::http::build_restricted_client(operator_cfg.timeout);
     let cache = Arc::new(Mutex::new(SourceCache::new(operator_cfg.cache_size)));

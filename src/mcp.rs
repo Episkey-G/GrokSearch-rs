@@ -240,22 +240,22 @@ fn tools_list() -> Value {
                         "extra_sources": {
                             "type": "integer",
                             "minimum": 0,
-                            "description": "Optional supplemental source count. Tavily is primary; Firecrawl is fallback. If omitted, GROK_SEARCH_EXTRA_SOURCES is used."
+                            "description": "Optional supplemental source count, served by the configured source chain (default order: Tavily, then Exa, TinyFish, Firecrawl — first provider with results wins; GROK_SEARCH_SOURCE_PROVIDERS overrides). If omitted, GROK_SEARCH_EXTRA_SOURCES is used."
                         },
                         "recency_days": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Restrict supplemental results to sources published within the last N days. Forwarded to Tavily as days+topic=news; also hinted to Grok prompt."
+                            "description": "Restrict supplemental results to sources published within the last N days. Honored natively by Tavily (days+topic=news), Exa (startPublishedDate), and TinyFish (recency window); providers that cannot honor filters (Firecrawl) are skipped for filtered requests. Also hinted to Grok prompt."
                         },
                         "include_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Only return supplemental results from these domains. Tavily honors strictly; Grok receives as soft preference."
+                            "description": "Only return supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft preference."
                         },
                         "exclude_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Suppress supplemental results from these domains. Tavily honors strictly; Grok receives as soft instruction."
+                            "description": "Suppress supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft instruction."
                         },
                         "include_content": {
                             "type": "boolean",
@@ -322,7 +322,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "doctor",
-                "description": "Diagnostic probe: live connectivity check for Grok, Tavily, and Firecrawl backends, plus masked configuration. Use to verify the server is wired up and reachable.",
+                "description": "Diagnostic probe: live connectivity check for the Grok backend and every configured source provider (Tavily / Exa / TinyFish / Firecrawl), plus the effective source chain and masked configuration. Use to verify the server is wired up and reachable.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]

@@ -8,8 +8,11 @@ MCP client
       -> src/service.rs
       -> credential provider: static API key or xAI OAuth token
       -> Grok Responses provider: /v1/responses with web_search and optional x_search
-      -> Tavily provider: search / extract / map
-      -> Firecrawl provider: search / scrape fallback
+      -> source chain (ordered; default tavily -> exa -> tinyfish -> firecrawl)
+           -> Tavily provider: search / extract / map
+           -> Exa provider: semantic search / contents fetch
+           -> TinyFish provider: search / JS-rendering fetch
+           -> Firecrawl provider: search / scrape fallback
       -> source cache
 ```
 
@@ -17,9 +20,9 @@ MCP client
 
 - `web_search` is the AI search path. Grok Responses is primary.
 - `get_sources` retrieves cached sources by `session_id`.
-- `web_fetch` fetches page content through Tavily Extract first, then Firecrawl scrape if configured.
-- `web_map` discovers URLs through Tavily Map.
-- Tavily and Firecrawl are not the default answer generators inside `web_search`; they provide enrichment, fallback sources, fetch, and map capability.
+- `web_fetch` fetches page content through the source chain in order (Tavily Extract, Exa contents, TinyFish fetch, Firecrawl scrape — whichever are configured; first non-empty page wins).
+- `web_map` discovers URLs through Tavily Map (the only provider with a real site-map endpoint). It is a dedicated capability rather than a chain position: a `GROK_SEARCH_SOURCE_PROVIDERS` list that leaves Tavily out of the supplemental chain still gets map from a configured `TAVILY_API_KEY`.
+- Source providers are not the default answer generators inside `web_search`; they provide enrichment, fallback sources, fetch, and map capability. The chain order is canonical (`tavily, exa, tinyfish, firecrawl`) over configured providers, or exactly `GROK_SEARCH_SOURCE_PROVIDERS` when set.
 - Agents should use `web_search` for concise sourced summaries, call `get_sources` before source-specific claims, citation lists, or follow-up fetches, and call `web_fetch` for exact page evidence, quotes, technical details, or when the summary is insufficient.
 
 ## Provider Layer
@@ -44,11 +47,9 @@ OAuth login is not a service boundary. `grok-search-rs login` temporarily listen
 Sources retain their origin through the `provider` field:
 
 - `grok_responses`: native Responses citation or web search source.
-- `tavily_enrichment`: supplemental Tavily source after Grok succeeds.
-- `tavily_fallback`: Tavily source used because Grok failed or was unverifiable.
-- `firecrawl_enrichment`: supplemental Firecrawl source after Grok succeeds, used when Tavily returns nothing.
-- `firecrawl_fallback`: Firecrawl source used because Grok failed or was unverifiable and Tavily returned nothing.
-- `tavily` / `firecrawl`: direct provider source before orchestration rewrites provenance.
+- `{provider}_enrichment` (`tavily_enrichment`, `exa_enrichment`, `tinyfish_enrichment`, `firecrawl_enrichment`): supplemental source after Grok succeeds, named for the chain provider that served it.
+- `{provider}_fallback` (`tavily_fallback`, `exa_fallback`, `tinyfish_fallback`, `firecrawl_fallback`): source used because Grok failed or was unverifiable, named for the chain provider that served it.
+- `tavily` / `exa` / `tinyfish` / `firecrawl`: direct provider source before orchestration rewrites provenance.
 
 ## Fallback Rules
 
@@ -58,7 +59,7 @@ Sources retain their origin through the `provider` field:
 - the provider response content is empty,
 - the provider response has no verifiable native sources.
 
-Fallback tries Tavily first, then Firecrawl when configured. The output exposes `search_provider`, `fallback_used`, and `fallback_reason` so MCP clients can distinguish a native Grok result from fallback-source handling.
+Fallback walks the source chain in order; the first provider with usable results serves the response. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests instead of silently violating the filter contract. The chain walk shares the request's global deadline (D-02), so a hanging provider stops the walk instead of granting every later position a fresh full timeout. The output exposes `search_provider`, `fallback_used`, and `fallback_reason` so MCP clients can distinguish a native Grok result from fallback-source handling.
 
 ## MCP Transport
 

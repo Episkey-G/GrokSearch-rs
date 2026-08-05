@@ -2,7 +2,44 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
-## 0.1.23 - 2026-08-01
+## Unreleased
+
+### Added
+
+- **可插拔的补充源链(source chain),新增 TinyFish 与 Exa 两个 provider。**
+  借鉴 smart-search 的 capability-chain 设计,把原先硬编码的 Tavily(primary)+
+  Firecrawl(fallback) 两槽位泛化为有序 provider 链:补充源与 generic fetch 按
+  链序尝试,第一个返回可用结果的 provider 胜出。默认链序为
+  `tavily → exa → tinyfish → firecrawl`(仅遍历已配置的 provider),
+  `GROK_SEARCH_SOURCE_PROVIDERS` 可显式重排/裁剪(非法名启动即报错)。
+  - **TinyFish**(closes #12):免费 Search & Fetch(不耗 credits,免费档限速
+    30 req/min),`TINYFISH_API_KEY` 一把 key 同时驱动
+    `api.search.tinyfish.ai`(GET)与 `api.fetch.tinyfish.ai`(POST,JS 渲染 +
+    PDF 抽取)。domain 过滤走官方专用参数 `include_domains`/`exclude_domains`
+    (`site:`/`-site:` 操作符上游已标记为 domain filtering 的 deprecated 路径,
+    会与用户 query 自带语法冲突),`recency_days` 映射为 `recency_minutes`。
+  - **Exa**:语义(embeddings-first)检索,原生支持
+    `includeDomains`/`excludeDomains`/`startPublishedDate`,fetch 走
+    `/contents`。按量计费,适合描述式查询、论文与官方域名发现。
+  - 远端 HTTP 传输新增 `X-Tinyfish-Api-Key` / `X-Exa-Api-Key` 两个
+    per-request 头;server 端环境变量同名 key 照旧被剥离,不会泄入租户请求。
+  - 来源标签泛化为 `{provider}_enrichment` / `{provider}_fallback`
+    (如 `exa_enrichment`、`tinyfish_fallback`);tavily/firecrawl 的既有标签、
+    filters 门控(带 domain/recency 过滤的请求跳过 Firecrawl)与 #31 的
+    零结果诊断语义全部保持不变。
+  - `doctor` 新增 `exa`/`tinyfish` 探针节点与 `source_chain` 字段,报告
+    生效的链序。
+  - 链遍历受请求全局 deadline(`GROK_SEARCH_TIMEOUT_SECONDS`)约束:某个
+    provider 挂起不会让后续每一位各拿一份完整超时,把总预算按链长翻倍。
+    `web_fetch` 直连路径同样按 D-02 收口——入口算一个 deadline,专项抽取器
+    与 generic 链共享(此前该路径完全无 deadline,专项与每个 provider 各吃
+    一份完整 client timeout)。
+  - `web_map` 是独立能力而非链上一环:即使 `GROK_SEARCH_SOURCE_PROVIDERS`
+    把 Tavily 排除出补充源链,只要配了 `TAVILY_API_KEY`,map 依旧可用。
+  - HTTP 模式在 bind 监听端口**之前**校验 `GROK_SEARCH_SOURCE_PROVIDERS`,
+    非法名不会变成"进程起来了但每个请求都失败"。
+
+
 
 ### Added
 

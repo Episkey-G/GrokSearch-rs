@@ -31,6 +31,16 @@ pub struct Config {
     pub firecrawl_api_url: String,
     pub firecrawl_api_key: Option<String>,
     pub firecrawl_enabled: bool,
+    pub tinyfish_search_api_url: String,
+    pub tinyfish_fetch_api_url: String,
+    pub tinyfish_api_key: Option<String>,
+    pub tinyfish_enabled: bool,
+    pub exa_api_url: String,
+    pub exa_api_key: Option<String>,
+    pub exa_enabled: bool,
+    /// Explicit source-provider chain order (lowercased names). Empty means
+    /// "use the built-in canonical order over whatever is configured".
+    pub source_providers: Vec<String>,
     pub default_extra_sources: usize,
     pub fallback_sources: usize,
     pub fetch_max_chars: Option<usize>,
@@ -76,6 +86,14 @@ impl std::fmt::Debug for Config {
             .field("firecrawl_api_url", &self.firecrawl_api_url)
             .field("firecrawl_api_key", &mask(&self.firecrawl_api_key))
             .field("firecrawl_enabled", &self.firecrawl_enabled)
+            .field("tinyfish_search_api_url", &self.tinyfish_search_api_url)
+            .field("tinyfish_fetch_api_url", &self.tinyfish_fetch_api_url)
+            .field("tinyfish_api_key", &mask(&self.tinyfish_api_key))
+            .field("tinyfish_enabled", &self.tinyfish_enabled)
+            .field("exa_api_url", &self.exa_api_url)
+            .field("exa_api_key", &mask(&self.exa_api_key))
+            .field("exa_enabled", &self.exa_enabled)
+            .field("source_providers", &self.source_providers)
             .field("default_extra_sources", &self.default_extra_sources)
             .field("fallback_sources", &self.fallback_sources)
             .field("fetch_max_chars", &self.fetch_max_chars)
@@ -117,6 +135,14 @@ struct ConfigFile {
     firecrawl_api_url: Option<String>,
     firecrawl_api_key: Option<String>,
     firecrawl_enabled: Option<bool>,
+    tinyfish_search_api_url: Option<String>,
+    tinyfish_fetch_api_url: Option<String>,
+    tinyfish_api_key: Option<String>,
+    tinyfish_enabled: Option<bool>,
+    exa_api_url: Option<String>,
+    exa_api_key: Option<String>,
+    exa_enabled: Option<bool>,
+    source_providers: Option<Vec<String>>,
     default_extra_sources: Option<usize>,
     fallback_sources: Option<usize>,
     fetch_max_chars: Option<usize>,
@@ -165,6 +191,20 @@ impl ConfigFile {
         insert(
             "FIRECRAWL_ENABLED",
             self.firecrawl_enabled.map(|b| b.to_string()),
+        );
+        insert("TINYFISH_SEARCH_API_URL", self.tinyfish_search_api_url);
+        insert("TINYFISH_FETCH_API_URL", self.tinyfish_fetch_api_url);
+        insert("TINYFISH_API_KEY", self.tinyfish_api_key);
+        insert(
+            "TINYFISH_ENABLED",
+            self.tinyfish_enabled.map(|b| b.to_string()),
+        );
+        insert("EXA_API_URL", self.exa_api_url);
+        insert("EXA_API_KEY", self.exa_api_key);
+        insert("EXA_ENABLED", self.exa_enabled.map(|b| b.to_string()));
+        insert(
+            "GROK_SEARCH_SOURCE_PROVIDERS",
+            self.source_providers.map(|list| list.join(",")),
         );
         insert(
             "GROK_SEARCH_EXTRA_SOURCES",
@@ -300,6 +340,28 @@ impl Config {
                 .cloned()
                 .filter(|value| !value.trim().is_empty()),
             firecrawl_enabled: bool_value(&map, "FIRECRAWL_ENABLED", true),
+            tinyfish_search_api_url: normalize_plain_base(&get(
+                &map,
+                "TINYFISH_SEARCH_API_URL",
+                "https://api.search.tinyfish.ai",
+            )),
+            tinyfish_fetch_api_url: normalize_plain_base(&get(
+                &map,
+                "TINYFISH_FETCH_API_URL",
+                "https://api.fetch.tinyfish.ai",
+            )),
+            tinyfish_api_key: map
+                .get("TINYFISH_API_KEY")
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            tinyfish_enabled: bool_value(&map, "TINYFISH_ENABLED", true),
+            exa_api_url: normalize_plain_base(&get(&map, "EXA_API_URL", "https://api.exa.ai")),
+            exa_api_key: map
+                .get("EXA_API_KEY")
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            exa_enabled: bool_value(&map, "EXA_ENABLED", true),
+            source_providers: csv_list(&map, "GROK_SEARCH_SOURCE_PROVIDERS"),
             default_extra_sources: usize_value(&map, "GROK_SEARCH_EXTRA_SOURCES", 3),
             fallback_sources: usize_value(&map, "GROK_SEARCH_FALLBACK_SOURCES", 5),
             fetch_max_chars: optional_positive_usize(&map, "GROK_SEARCH_FETCH_MAX_CHARS"),
@@ -340,7 +402,7 @@ impl Config {
 
     pub fn redacted_diagnostics(&self) -> String {
         format!(
-            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={}",
+            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} tinyfish_api_key={} exa_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={}",
             self.grok_api_url,
             redact(self.grok_api_key.as_deref()),
             self.grok_auth_mode,
@@ -353,6 +415,8 @@ impl Config {
             self.x_search_enabled,
             redact(self.tavily_api_key.as_deref()),
             redact(self.firecrawl_api_key.as_deref()),
+            redact(self.tinyfish_api_key.as_deref()),
+            redact(self.exa_api_key.as_deref()),
             self.default_extra_sources,
             self.fallback_sources,
             self.timeout.as_secs(),
@@ -480,11 +544,19 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # grok_model         = "grok-4-1-fast-reasoning"
 # x_search_enabled   = false          # Grok X/Twitter search tool
 # firecrawl_api_key  = "fc-..."       # Optional fetch fallback   https://firecrawl.dev
+# tinyfish_api_key   = "tf-..."       # Optional free search/fetch  https://tinyfish.ai
+# exa_api_key        = "exa-..."      # Optional semantic search    https://exa.ai
+# source_providers   = ["tavily", "exa", "tinyfish", "firecrawl"]
+#                                     # explicit chain order; omit for the
+#                                     # built-in order over configured providers
 
 # ── Endpoints (only set when using a self-hosted gateway) ─────
-# grok_api_url      = "https://api.x.ai"
-# tavily_api_url    = "https://api.tavily.com"
-# firecrawl_api_url = "https://api.firecrawl.dev"
+# grok_api_url            = "https://api.x.ai"
+# tavily_api_url          = "https://api.tavily.com"
+# firecrawl_api_url       = "https://api.firecrawl.dev"
+# tinyfish_search_api_url = "https://api.search.tinyfish.ai"
+# tinyfish_fetch_api_url  = "https://api.fetch.tinyfish.ai"
+# exa_api_url             = "https://api.exa.ai"
 
 # ── OpenAI-compatible transport (alternative to grok_*) ───────
 # Set these three to use a /v1/chat/completions gateway. When grok_api_key
@@ -499,6 +571,8 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # web_search_enabled = true
 # tavily_enabled     = true
 # firecrawl_enabled  = true
+# tinyfish_enabled   = true
+# exa_enabled        = true
 
 # ── Behavior tuning ───────────────────────────────────────────
 # default_extra_sources = 3
@@ -567,6 +641,24 @@ fn normalize_plain_base(url: &str) -> String {
 
 fn bool_value(map: &HashMap<String, String>, key: &str, default: bool) -> bool {
     map.get(key).map(|v| bool_literal(v)).unwrap_or(default)
+}
+
+/// Comma-separated list → trimmed, lowercased entries, de-duplicated with
+/// first occurrence winning. Absent/blank values yield an empty list.
+fn csv_list(map: &HashMap<String, String>, key: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for part in map
+        .get(key)
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split(',')
+    {
+        let name = part.trim().to_ascii_lowercase();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn bool_literal(value: &str) -> bool {

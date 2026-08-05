@@ -172,19 +172,58 @@ pub async fn post_json_with_status(
     body: &Value,
     label: &str,
 ) -> std::result::Result<Value, HttpFailure> {
-    let mut response = client
-        .post(endpoint)
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
-        .await
-        .map_err(|err| {
-            HttpFailure::transport(if err.is_timeout() {
-                GrokSearchError::Timeout(format!("{label} request timed out: {err}"))
-            } else {
-                GrokSearchError::Provider(format!("{label} request failed: {err}"))
-            })
-        })?;
+    send_json(client.post(endpoint).bearer_auth(api_key).json(body), label).await
+}
+
+/// Like [`post_json`], but authenticated with a provider-specific header
+/// (e.g. TinyFish's `X-API-Key`) instead of a bearer `Authorization`.
+pub async fn post_json_with_header_auth(
+    client: &Client,
+    endpoint: &str,
+    header: (&str, &str),
+    body: &Value,
+    label: &str,
+) -> Result<Value> {
+    send_json(
+        client.post(endpoint).header(header.0, header.1).json(body),
+        label,
+    )
+    .await
+    .map_err(|failure| failure.error)
+}
+
+/// Authenticated JSON GET with query parameters and a provider-specific auth
+/// header, for GET-style search APIs (e.g. TinyFish). Same error
+/// normalization as [`post_json`].
+pub async fn get_json_with_header_auth(
+    client: &Client,
+    endpoint: &str,
+    query: &[(&str, String)],
+    header: (&str, &str),
+    label: &str,
+) -> Result<Value> {
+    send_json(
+        client.get(endpoint).query(query).header(header.0, header.1),
+        label,
+    )
+    .await
+    .map_err(|failure| failure.error)
+}
+
+/// Send a prepared JSON request and normalize transport / status / parse
+/// failures into `HttpFailure`. Shared by the bearer- and header-auth helpers
+/// so every provider gets identical error handling (including the SSE path).
+async fn send_json(
+    request: reqwest::RequestBuilder,
+    label: &str,
+) -> std::result::Result<Value, HttpFailure> {
+    let mut response = request.send().await.map_err(|err| {
+        HttpFailure::transport(if err.is_timeout() {
+            GrokSearchError::Timeout(format!("{label} request timed out: {err}"))
+        } else {
+            GrokSearchError::Provider(format!("{label} request failed: {err}"))
+        })
+    })?;
 
     let status = response.status();
     let content_type = response

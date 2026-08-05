@@ -183,6 +183,8 @@ Required keys
   GROK_SEARCH_API_KEY   xAI / Grok-compatible key   (https://x.ai/api)
   TAVILY_API_KEY        Tavily fetch + map          (https://tavily.com)
   FIRECRAWL_API_KEY     optional fetch fallback     (https://firecrawl.dev)
+  TINYFISH_API_KEY      optional free search+fetch  (https://tinyfish.ai)
+  EXA_API_KEY           optional semantic search    (https://exa.ai)
 
 OAuth alternative
   grok-search-rs login

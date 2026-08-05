@@ -2,7 +2,7 @@
 
 ![GrokSearch-rs product banner](assets/groksearch-rs-banner.png)
 
-**A lightweight Rust MCP server for Grok / OpenAI‑compatible web search, plus Tavily fetch/map and Firecrawl fallback.**
+**A lightweight Rust MCP server for Grok / OpenAI‑compatible web search, backed by an ordered source chain — Tavily, Exa, TinyFish, Firecrawl — for supplemental sources, fetch, and map.**
 
 `grok-search-rs` is an **MCP server** — run it locally over **stdio** (your client launches it; you do not run it directly) or as a **remote Streamable HTTP** service for mobile / multi‑device access (see [self-hosting](#self-hosting-remote-http)). It exposes one set of tools (`web_search`, `get_sources`, `web_fetch`, `web_map`, `doctor`) and supports two upstream transports so you can plug into either xAI's official API or any OpenAI‑compatible relay.
 
@@ -12,11 +12,11 @@
 
 - 🔎 **Live web search** with cited sources, cached for follow‑up `get_sources` calls. Opt‑in `include_content` enriches the top sources with full extracted text in one call.
 - 📏 **Response budgeting** — `web_search` keeps responses inside agent context limits: only the top `max_inline_sources` carry inline text, a whole‑response char budget (`response_max_chars`, default 45k — sized to stay under the MCP client token ceiling after JSON serialization) trims tail sources with recovery notes, `response_format: "concise" | "detailed"` picks the payload size, and `get_sources` pages through cached sources with `offset`/`limit`. The session cache always keeps full content.
-- 🧩 **Structured `web_fetch`** — GitHub issues/PRs/releases, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, release notes, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic Tavily → Firecrawl chain. Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
+- 🧩 **Structured `web_fetch`** — GitHub issues/PRs/releases, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, release notes, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic source chain (Tavily → Exa → TinyFish → Firecrawl, as configured). Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
 - 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
 - 🔐 **Optional Grok OAuth mode** — `login/status/logout` commands store a local xAI OAuth token for Responses auth, so the MCP server can run without `GROK_SEARCH_API_KEY`.
 - 🌐 **Optional remote mode** — build with `--features http` to serve the same tools over **Streamable HTTP** (multi‑tenant, bring‑your‑own‑key via request headers) for mobile / multi‑device access. See [self-hosting](#self-hosting-remote-http).
-- 📥 **Tavily fetch / map** for full‑text extraction and link discovery, with **Firecrawl** as automatic fallback. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
+- 📥 **Pluggable source chain** — supplemental sources and generic fetch walk an ordered provider chain: **Tavily** (RAG‑tuned search + extract + map), **Exa** (semantic search, native domain/date filters), **TinyFish** (free search + JS‑rendering fetch), **Firecrawl** (robust scrape fallback). First provider with results wins; `GROK_SEARCH_SOURCE_PROVIDERS` reorders. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
 - 🐦 **Optional X/Twitter search** via `x_search` (Responses transport only).
 - 🩺 **`doctor`** — connectivity probe + redacted config in one tool call.
 - 🗂 **Single global config file** so multiple MCP clients share one set of keys.
@@ -119,9 +119,11 @@ The MCP **transport** decides how config reaches the server — same values, dif
 | Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
 | Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
 | Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
+| TinyFish API key | `TINYFISH_API_KEY` | `X-Tinyfish-Api-Key` |
+| Exa API key | `EXA_API_KEY` | `X-Exa-Api-Key` |
 | GitHub token | `GITHUB_TOKEN` | `X-GitHub-Token` |
 
-The tables below use env-key names (they also drive `config.toml` / stdio); on the remote transport send the header from the row above. Full reference and per-transport examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md#configuration-channels-stdio-env-vs-remote-headers). Both Tavily and Firecrawl keys are shared across transports.
+The tables below use env-key names (they also drive `config.toml` / stdio); on the remote transport send the header from the row above. Full reference and per-transport examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md#configuration-channels-stdio-env-vs-remote-headers). All source-provider keys (Tavily / Exa / TinyFish / Firecrawl) are shared across transports.
 
 ### A. Native Grok Responses (default)
 
@@ -175,16 +177,19 @@ Notes:
 - `GROK_SEARCH_X_SEARCH=true` is **silently ignored** on this transport (a one‑line stderr warning prints at startup). `x_search` only exists on the Responses API.
 - Source extraction reads four parallel paths and de‑duplicates by URL: OpenAI `annotations[].url_citation`, Perplexity‑style `citations`, top‑level `search_sources[]`, and inline `[[n]](url)` markers.
 
-### Tavily / Firecrawl (shared)
+### Source providers (shared)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TAVILY_API_KEY` | — *(required for `web_fetch` / `web_map`)* | Tavily key. Comma‑separated list rotates round‑robin with failover on HTTP 401/403/429/432/433. |
+| `TAVILY_API_KEY` | — *(required for `web_map`)* | Tavily key. Comma‑separated list rotates round‑robin with failover on HTTP 401/403/429/432/433. |
 | `TAVILY_API_URL` | `https://api.tavily.com` | Tavily base. |
-| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Extra Tavily sources after a Grok answer (`0` disables). |
+| `GROK_SEARCH_EXTRA_SOURCES` | `3` | Extra chain‑served sources after a Grok answer (`0` disables). |
 | `GROK_SEARCH_FALLBACK_SOURCES` | `5` | Fallback source count when the AI step can't verify itself. |
 | `FIRECRAWL_API_KEY` | unset | Enables Firecrawl as `web_fetch` / source fallback. |
 | `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base. |
+| `TINYFISH_API_KEY` | unset | Enables TinyFish (free search + JS‑rendering fetch) in the chain. |
+| `EXA_API_KEY` | unset | Enables Exa (semantic search, native filters) in the chain. |
+| `GROK_SEARCH_SOURCE_PROVIDERS` | unset | Explicit chain order, e.g. `tinyfish,tavily,firecrawl`. Unset = canonical order `tavily, exa, tinyfish, firecrawl` over configured providers. |
 | `GROK_SEARCH_CACHE_SIZE` | `256` | Max cached `web_search` sessions. |
 | `GROK_SEARCH_TIMEOUT_SECONDS` | `60` | HTTP timeout for all upstreams. |
 | `GROK_SEARCH_FETCH_MAX_CHARS` | unset | Default char cap on `web_fetch`. |
