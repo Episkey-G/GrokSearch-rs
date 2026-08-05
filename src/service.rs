@@ -1131,37 +1131,50 @@ impl SearchService {
 
     pub async fn web_fetch(&self, url: &str, max_chars: Option<usize>) -> Result<WebFetchOutput> {
         let effective_limit = max_chars.or(self.config.fetch_max_chars);
+        // D-02, as on the web_search path: one deadline for the whole call.
+        // The specialist attempt and every generic-chain provider draw from
+        // the same budget, so a slow specialist followed by a slow chain
+        // cannot spend a full GROK_SEARCH_TIMEOUT_SECONDS apiece.
+        let deadline = tokio::time::Instant::now() + self.config.timeout;
 
         let (content, source_type, fallback_reason) = match url::Url::parse(url) {
             Ok(parsed) => {
-                match crate::sources::resolve_content(
+                let caps = crate::sources::SourceCaps {
+                    max_answers: self.config.source_max_answers,
+                    max_comments: self.config.source_max_comments,
+                };
+                let specialist = crate::sources::resolve_content(
                     &self.http_client,
                     &parsed,
                     self.source_router.as_ref(),
-                    &crate::sources::SourceCaps {
-                        max_answers: self.config.source_max_answers,
-                        max_comments: self.config.source_max_comments,
-                    },
-                )
-                .await
-                {
+                    &caps,
+                );
+                match tokio::time::timeout_at(deadline, specialist).await {
                     // Specialist succeeded — keep its content and source type.
-                    Ok((content, kind)) => (content, kind, None),
+                    Ok(Ok((content, kind))) => (content, kind, None),
                     // No specialist matched: go generic silently (D-01).
-                    Err(reason) if reason == crate::sources::NO_SPECIALIST_MATCH => {
-                        let generic = self.web_fetch_raw(url).await?;
+                    Ok(Err(reason)) if reason == crate::sources::NO_SPECIALIST_MATCH => {
+                        let generic = self.web_fetch_raw(url, deadline).await?;
                         (generic, crate::sources::SourceType::Generic, None)
                     }
                     // Specialist matched but failed/empty: surface the reason (D-01).
-                    Err(reason) => {
-                        let generic = self.web_fetch_raw(url).await?;
+                    Ok(Err(reason)) => {
+                        let generic = self.web_fetch_raw(url, deadline).await?;
                         (generic, crate::sources::SourceType::Generic, Some(reason))
+                    }
+                    // The budget is gone, so the generic chain cannot run
+                    // either — report the timeout instead of pretending there
+                    // is another path left to try.
+                    Err(_elapsed) => {
+                        return Err(GrokSearchError::Timeout(format!(
+                            "web_fetch timed out extracting {url} (GROK_SEARCH_TIMEOUT_SECONDS)"
+                        )))
                     }
                 }
             }
             // Malformed URL is not a specialist failure — go generic, no reason.
             Err(_) => {
-                let generic = self.web_fetch_raw(url).await?;
+                let generic = self.web_fetch_raw(url, deadline).await?;
                 (generic, crate::sources::SourceType::Generic, None)
             }
         };
@@ -1175,10 +1188,18 @@ impl SearchService {
         ))
     }
 
-    async fn web_fetch_raw(&self, url: &str) -> Result<String> {
-        generic_source_fetch(&self.active_sources(), url)
-            .await
-            .map(|page| page.content)
+    /// Generic fetch through the source chain, bounded by the call's shared
+    /// `deadline`. Mirrors how inline enrichment already wraps the same
+    /// helper: without this, each chain position would get its own full
+    /// client timeout and the chain would multiply the configured budget.
+    async fn web_fetch_raw(&self, url: &str, deadline: tokio::time::Instant) -> Result<String> {
+        let chain = self.active_sources();
+        match tokio::time::timeout_at(deadline, generic_source_fetch(&chain, url)).await {
+            Ok(result) => result.map(|page| page.content),
+            Err(_elapsed) => Err(GrokSearchError::Timeout(format!(
+                "web_fetch timed out fetching {url} through the source chain (GROK_SEARCH_TIMEOUT_SECONDS)"
+            ))),
+        }
     }
 
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
@@ -1933,6 +1954,69 @@ mod chain_tests {
         assert!(
             err.to_string().contains("request deadline reached"),
             "error must name the deadline: {err}"
+        );
+    }
+
+    /// Generic fetch hangs; search is instant and empty.
+    struct HangingFetchProvider;
+    #[async_trait]
+    impl SourceProvider for HangingFetchProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(FetchedPage::text("never reached"))
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    // D-02 on the direct web_fetch path: two hanging chain providers must
+    // share one request budget, not take a full client timeout each.
+    #[tokio::test]
+    async fn web_fetch_chain_is_bounded_by_one_deadline() {
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "fake"),
+            ("GROK_SEARCH_TIMEOUT_SECONDS", "1"),
+        ]);
+        let svc = SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            source_slots: Arc::new(vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(HangingFetchProvider),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &FIRECRAWL_SPEC,
+                    provider: Arc::new(HangingFetchProvider),
+                }),
+            ]),
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+            http_client: crate::providers::http::build_client(std::time::Duration::from_secs(5)),
+            source_router: Arc::new(crate::sources::SourceRouter::default()),
+        };
+        let started = std::time::Instant::now();
+        let err = svc
+            .web_fetch("https://example.com/page", None)
+            .await
+            .expect_err("hanging chain must time out");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "web_fetch must be cut at the ~1s deadline, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(err, GrokSearchError::Timeout(_)),
+            "expected a Timeout error, got: {err:?}"
         );
     }
 

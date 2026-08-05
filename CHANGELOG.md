@@ -30,6 +30,9 @@ All notable changes to GrokSearch-rs are documented here.
     生效的链序。
   - 链遍历受请求全局 deadline(`GROK_SEARCH_TIMEOUT_SECONDS`)约束:某个
     provider 挂起不会让后续每一位各拿一份完整超时,把总预算按链长翻倍。
+    `web_fetch` 直连路径同样按 D-02 收口——入口算一个 deadline,专项抽取器
+    与 generic 链共享(此前该路径完全无 deadline,专项与每个 provider 各吃
+    一份完整 client timeout)。
   - `web_map` 是独立能力而非链上一环:即使 `GROK_SEARCH_SOURCE_PROVIDERS`
     把 Tavily 排除出补充源链,只要配了 `TAVILY_API_KEY`,map 依旧可用。
   - HTTP 模式在 bind 监听端口**之前**校验 `GROK_SEARCH_SOURCE_PROVIDERS`,
