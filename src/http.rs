@@ -110,6 +110,11 @@ struct AppState {
 pub async fn run_http(base_env: HashMap<String, String>, bind: SocketAddr) -> anyhow::Result<()> {
     // Operator (non-secret) config drives the shared client + cache sizing.
     let operator_cfg = Config::from_env_map(base_env.clone());
+    // Fail before binding on a bad GROK_SEARCH_SOURCE_PROVIDERS: the chain is
+    // operator-fixed (never a request header), and deferring the error to
+    // per-request service construction would leave a listener up that rejects
+    // every call.
+    crate::service::validate_source_providers(&operator_cfg)?;
     // Restricted client: rejects redirects to non-public IP-literal targets.
     let http_client = crate::providers::http::build_restricted_client(operator_cfg.timeout);
     let cache = Arc::new(Mutex::new(SourceCache::new(operator_cfg.cache_size)));

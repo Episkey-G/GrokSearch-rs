@@ -303,24 +303,36 @@ fn provider_enabled(spec: &ProviderSpec, config: &Config) -> bool {
 /// list, exactly the named providers are slotted, and every named-but-absent
 /// one gets a `Missing` slot: the operator asked for it, so its absence is
 /// worth reporting.
+/// Check every name in `GROK_SEARCH_SOURCE_PROVIDERS` against the known
+/// provider registry. Exposed separately from [`build_source_slots`] so the
+/// HTTP transport can fail at startup (before binding the listener) instead
+/// of failing every request later — the operator's chain is operator-fixed
+/// config, never a per-request header, so a startup check covers it fully.
+pub fn validate_source_providers(config: &Config) -> Result<()> {
+    for name in &config.source_providers {
+        if !CANONICAL_SOURCE_ORDER.iter().any(|spec| spec.name == name) {
+            return Err(GrokSearchError::InvalidParams(format!(
+                "unknown source provider \"{name}\" in GROK_SEARCH_SOURCE_PROVIDERS (valid: tavily, exa, tinyfish, firecrawl)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn build_source_slots(config: &Config, http: &reqwest::Client) -> Result<Vec<SourceSlot>> {
+    validate_source_providers(config)?;
     let explicit = !config.source_providers.is_empty();
     let specs: Vec<&'static ProviderSpec> = if explicit {
         config
             .source_providers
             .iter()
-            .map(|name| {
+            .filter_map(|name| {
                 CANONICAL_SOURCE_ORDER
                     .iter()
                     .copied()
                     .find(|spec| spec.name == name)
-                    .ok_or_else(|| {
-                        GrokSearchError::InvalidParams(format!(
-                            "unknown source provider \"{name}\" in GROK_SEARCH_SOURCE_PROVIDERS (valid: tavily, exa, tinyfish, firecrawl)"
-                        ))
-                    })
             })
-            .collect::<Result<_>>()?
+            .collect()
     } else {
         CANONICAL_SOURCE_ORDER.to_vec()
     };
@@ -767,7 +779,7 @@ impl SearchService {
 
         let grok_future = self.ai.search(&request);
         let speculative_future =
-            self.fetch_raw_extra_sources(&input.query, speculative_count, &filters);
+            self.fetch_raw_extra_sources(&input.query, speculative_count, &filters, deadline);
         let (grok_result, raw) = tokio::join!(grok_future, speculative_future);
 
         let response = match grok_result {
@@ -866,6 +878,7 @@ impl SearchService {
         query: &str,
         count: usize,
         filters: &SearchFilters,
+        deadline: tokio::time::Instant,
     ) -> RawSources {
         if count == 0 {
             return RawSources::empty(vec![SourceNote::config(
@@ -888,7 +901,27 @@ impl SearchService {
                         )));
                         continue;
                     }
-                    match entry.provider.search_sources(query, count, filters).await {
+                    // D-02: the whole chain shares the request's global
+                    // deadline. Without this, every chain position gets a
+                    // fresh full client timeout and a slow chain multiplies
+                    // the configured budget by its length.
+                    let attempt = tokio::time::timeout_at(
+                        deadline,
+                        entry.provider.search_sources(query, count, filters),
+                    )
+                    .await;
+                    let outcome = match attempt {
+                        Ok(outcome) => outcome,
+                        Err(_elapsed) => {
+                            // Later providers would hit the same expired
+                            // deadline immediately; one note explains the stop.
+                            notes.push(SourceNote::broken(format!(
+                                "{name}: timed out (request deadline reached; providers after it were not tried)"
+                            )));
+                            break;
+                        }
+                    };
+                    match outcome {
                         Ok(sources) => match usable_or_note(name, sources) {
                             Ok(usable) => {
                                 if !notes.is_empty() {
@@ -1151,16 +1184,23 @@ impl SearchService {
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
         // Only providers with a real site-map endpoint qualify (Tavily today);
         // the search-shaped `map` impls on the other providers are not a
-        // substitute for actual URL discovery.
-        let entry = self
+        // substitute for actual URL discovery. web_map is a dedicated
+        // capability, not part of the supplemental-source chain — an operator
+        // whose GROK_SEARCH_SOURCE_PROVIDERS excludes Tavily from the chain
+        // keeps map as long as TAVILY_API_KEY is configured, so a map-capable
+        // provider absent from the chain is instantiated directly.
+        let provider = self
             .source_slots
             .iter()
             .find_map(|slot| match slot {
-                SourceSlot::Active(entry) if entry.spec.supports_map => Some(entry.clone()),
+                SourceSlot::Active(entry) if entry.spec.supports_map => {
+                    Some(entry.provider.clone())
+                }
                 _ => None,
             })
+            .or_else(|| instantiate_source(&TAVILY_SPEC, &self.config, &self.http_client))
             .ok_or(GrokSearchError::MissingConfig("TAVILY_API_KEY"))?;
-        entry.provider.map(url, max_results).await
+        provider.map(url, max_results).await
     }
 
     /// Runtime diagnostics with live connectivity probes against each configured backend.
@@ -1830,6 +1870,103 @@ mod chain_tests {
                 .iter()
                 .map(|source| source.provider.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Search hangs far past any test deadline; fetch/map are instant.
+    struct HangingSearchProvider;
+    #[async_trait]
+    impl SourceProvider for HangingSearchProvider {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage::text(format!("hanging provider fetch {url}")))
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    // D-02: a hanging chain provider must be cut at the request's global
+    // deadline, not granted a fresh full client timeout per chain position.
+    #[tokio::test]
+    async fn chain_is_bounded_by_the_global_deadline() {
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "fake"),
+            ("GROK_SEARCH_TIMEOUT_SECONDS", "1"),
+        ]);
+        let svc = SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(ErrAiProvider),
+            source_slots: Arc::new(vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(HangingSearchProvider),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &TINYFISH_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tinyfish")),
+                }),
+            ]),
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+            http_client: crate::providers::http::build_client(std::time::Duration::from_secs(5)),
+            source_router: Arc::new(crate::sources::SourceRouter::default()),
+        };
+        let started = std::time::Instant::now();
+        let err = svc
+            .web_search(concise_input())
+            .await
+            .expect_err("deadline-cut chain with a failed AI yields zero sources");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "chain must be cut at the ~1s deadline, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("request deadline reached"),
+            "error must name the deadline: {err}"
+        );
+    }
+
+    // web_map is a dedicated Tavily capability: excluding Tavily from the
+    // supplemental chain must not break map while TAVILY_API_KEY is set.
+    #[tokio::test]
+    async fn web_map_survives_a_chain_that_excludes_tavily() {
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "fake"),
+            ("TAVILY_API_KEY", "fake-tavily"),
+            ("GROK_SEARCH_SOURCE_PROVIDERS", "tinyfish"),
+        ]);
+        let svc = SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            source_slots: Arc::new(vec![SourceSlot::Active(SourceEntry {
+                spec: &TINYFISH_SPEC,
+                provider: Arc::new(NamedSourceProvider("tinyfish")),
+            })]),
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+            http_client: crate::providers::http::build_client(std::time::Duration::from_secs(5)),
+            source_router: Arc::new(crate::sources::SourceRouter::default()),
+        };
+        // The chain has no map-capable slot, so web_map instantiates Tavily
+        // from config; the fake key means the call itself fails upstream, but
+        // it must NOT fail as MissingConfig("TAVILY_API_KEY").
+        let err = svc
+            .web_map("https://example.com", 3)
+            .await
+            .expect_err("fake key cannot reach real Tavily");
+        assert!(
+            !matches!(err, GrokSearchError::MissingConfig(_)),
+            "web_map must not report missing config when TAVILY_API_KEY is set: {err:?}"
         );
     }
 

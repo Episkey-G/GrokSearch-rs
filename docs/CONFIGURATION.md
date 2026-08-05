@@ -158,7 +158,9 @@ Semantic (embeddings-first) search with native `includeDomains` / `excludeDomain
 
 ## Source chain
 
-Supplemental sources and generic (non-specialist) fetch walk an ordered provider chain; the first provider with usable output wins and later ones are pure fallback. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests. `web_map` remains Tavily-only.
+Supplemental sources and generic (non-specialist) fetch walk an ordered provider chain; the first provider with usable output wins and later ones are pure fallback. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests. The whole chain shares one request deadline (`GROK_SEARCH_TIMEOUT_SECONDS`) — a slow provider cannot multiply the budget by the chain length.
+
+`web_map` is a separate capability, not part of this chain: it always uses Tavily whenever `TAVILY_API_KEY` is configured, even when the chain excludes Tavily.
 
 | Variable | Default | Description |
 |---|---|---|

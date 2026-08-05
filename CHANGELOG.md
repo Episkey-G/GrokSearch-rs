@@ -28,6 +28,12 @@ All notable changes to GrokSearch-rs are documented here.
     零结果诊断语义全部保持不变。
   - `doctor` 新增 `exa`/`tinyfish` 探针节点与 `source_chain` 字段,报告
     生效的链序。
+  - 链遍历受请求全局 deadline(`GROK_SEARCH_TIMEOUT_SECONDS`)约束:某个
+    provider 挂起不会让后续每一位各拿一份完整超时,把总预算按链长翻倍。
+  - `web_map` 是独立能力而非链上一环:即使 `GROK_SEARCH_SOURCE_PROVIDERS`
+    把 Tavily 排除出补充源链,只要配了 `TAVILY_API_KEY`,map 依旧可用。
+  - HTTP 模式在 bind 监听端口**之前**校验 `GROK_SEARCH_SOURCE_PROVIDERS`,
+    非法名不会变成"进程起来了但每个请求都失败"。
 
 
 

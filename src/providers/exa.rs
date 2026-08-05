@@ -3,8 +3,7 @@
 //! Exa is an embeddings-first engine: strong on descriptive queries, papers,
 //! official domains, and low-noise discovery, with native support for the
 //! whole `SearchFilters` contract (domain include/exclude lists and a
-//! published-date lower bound). Fetch goes through `/contents`. Auth accepts
-//! `Authorization: Bearer`, so the shared bearer helpers apply as-is.
+//! published-date lower bound). Fetch goes through `/contents`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,7 +14,12 @@ use crate::error::{GrokSearchError, Result};
 use crate::model::search::SearchFilters;
 use crate::model::source::{FetchedPage, Source};
 
-use super::http::{build_client, post_json};
+use super::http::{build_client, post_json_with_header_auth};
+
+/// Exa's canonical auth channel. The docs also describe `Authorization:
+/// Bearer` as accepted, but every reference example uses this header — stick
+/// to the primary documented path rather than the alternate one.
+const AUTH_HEADER: &str = "x-api-key";
 
 /// Exa's public `numResults` ceiling.
 const MAX_NUM_RESULTS: usize = 100;
@@ -57,10 +61,10 @@ impl ExaProvider {
         filters: &SearchFilters,
     ) -> Result<Vec<Source>> {
         let body = exa_search_request_body(query, max_results, filters, now_unix_seconds());
-        let raw = post_json(
+        let raw = post_json_with_header_auth(
             &self.client,
             &self.endpoint("search"),
-            &self.api_key,
+            (AUTH_HEADER, &self.api_key),
             &body,
             "Exa",
         )
@@ -69,10 +73,10 @@ impl ExaProvider {
     }
 
     pub async fn fetch(&self, url: &str) -> Result<FetchedPage> {
-        let raw = post_json(
+        let raw = post_json_with_header_auth(
             &self.client,
             &self.endpoint("contents"),
-            &self.api_key,
+            (AUTH_HEADER, &self.api_key),
             &json!({ "urls": [url], "text": true }),
             "Exa",
         )
