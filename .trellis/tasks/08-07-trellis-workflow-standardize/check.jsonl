@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/08-07-trellis-workflow-standardize/research/workflow-customization-contract.md", "reason": "验收必须对照的五类解析结构与官方验证命令"}
+{"file": ".claude/skills/trellis-meta/references/customize-local/change-workflow.md", "reason": "判断改动是否守住解析契约、是否漏同步平台目录"}
+{"file": ".trellis/spec/guides/index.md", "reason": "跨层与复用思考指南"}
