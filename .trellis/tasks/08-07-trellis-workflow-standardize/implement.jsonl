@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/08-07-trellis-workflow-standardize/research/workflow-customization-contract.md", "reason": "官方解析契约、safe editing boundary、0.6.14 与 0.7 的能力边界"}
+{"file": ".claude/skills/trellis-meta/references/customize-local/change-workflow.md", "reason": "Trellis 官方认可的 workflow 修改流程与同步要求"}
+{"file": ".claude/skills/trellis-meta/references/local-architecture/multi-agent-channel.md", "reason": "channel agent 是 role card、无 tools 字段、与 .claude/agents 完全独立"}
+{"file": ".claude/skills/trellis-meta/references/platform-files/agents.md", "reason": "各平台 agent 文件面，改 agent 定义时的同步范围"}
