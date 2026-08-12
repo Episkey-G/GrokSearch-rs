@@ -57,6 +57,10 @@ pub struct Config {
     pub enrich_max_chars: usize,
     pub max_inline_sources: usize,
     pub response_max_chars: usize,
+    /// Default reasoning intensity for Grok/OpenAI-compatible upstreams.
+    /// `None` = omit the field (provider default). Values:
+    /// `low` | `medium` | `high` | `xhigh` | `max`.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Hand-written `Debug` that masks secret-bearing fields so a stray
@@ -113,6 +117,7 @@ impl std::fmt::Debug for Config {
             .field("enrich_max_chars", &self.enrich_max_chars)
             .field("max_inline_sources", &self.max_inline_sources)
             .field("response_max_chars", &self.response_max_chars)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -158,6 +163,7 @@ struct ConfigFile {
     enrich_max_chars: Option<usize>,
     max_inline_sources: Option<usize>,
     response_max_chars: Option<usize>,
+    reasoning_effort: Option<String>,
 }
 
 impl ConfigFile {
@@ -254,6 +260,7 @@ impl ConfigFile {
             "GROK_SEARCH_RESPONSE_MAX_CHARS",
             self.response_max_chars.map(|n| n.to_string()),
         );
+        insert("GROK_SEARCH_REASONING_EFFORT", self.reasoning_effort);
         out
     }
 }
@@ -387,6 +394,7 @@ impl Config {
             enrich_max_chars: usize_value(&map, "GROK_SEARCH_ENRICH_MAX_CHARS", 15000),
             max_inline_sources: usize_value(&map, "GROK_SEARCH_MAX_INLINE_SOURCES", 5),
             response_max_chars: usize_value(&map, "GROK_SEARCH_RESPONSE_MAX_CHARS", 45_000),
+            reasoning_effort: reasoning_effort_value(&map, "GROK_SEARCH_REASONING_EFFORT"),
         }
     }
 
@@ -402,7 +410,7 @@ impl Config {
 
     pub fn redacted_diagnostics(&self) -> String {
         format!(
-            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} tinyfish_api_key={} exa_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={}",
+            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} reasoning_effort={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} tinyfish_api_key={} exa_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={}",
             self.grok_api_url,
             redact(self.grok_api_key.as_deref()),
             self.grok_auth_mode,
@@ -411,6 +419,7 @@ impl Config {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "default".to_string()),
             self.grok_model,
+            self.reasoning_effort.as_deref().unwrap_or("unset"),
             self.web_search_enabled,
             self.x_search_enabled,
             redact(self.tavily_api_key.as_deref()),
@@ -542,6 +551,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 
 # ── Common knobs ──────────────────────────────────────────────
 # grok_model         = "grok-4-1-fast-reasoning"
+# reasoning_effort   = "high"         # low|medium|high|xhigh|max (omit = provider default)
 # x_search_enabled   = false          # Grok X/Twitter search tool
 # firecrawl_api_key  = "fc-..."       # Optional fetch fallback   https://firecrawl.dev
 # tinyfish_api_key   = "tf-..."       # Optional free search/fetch  https://tinyfish.ai
@@ -680,6 +690,33 @@ fn auth_mode_value(map: &HashMap<String, String>) -> AuthMode {
             AuthMode::ApiKey
         }
         _ => AuthMode::ApiKey,
+    }
+}
+
+/// Parse and normalize a reasoning-effort setting.
+/// Accepted: `low` | `medium` | `high` | `xhigh` | `max` (case-insensitive).
+/// Blank/absent → `None` (omit the field; provider default applies).
+/// Unknown values warn and fall back to `None`.
+fn reasoning_effort_value(map: &HashMap<String, String>, key: &str) -> Option<String> {
+    let raw = map.get(key)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    parse_reasoning_effort(raw).or_else(|| {
+        eprintln!(
+            "unknown {key}=\"{raw}\"; ignoring. Valid values: low, medium, high, xhigh, max."
+        );
+        None
+    })
+}
+
+/// Normalize a free-form reasoning-effort string. Returns `None` for blank or
+/// unrecognized values (caller decides whether to warn).
+pub fn parse_reasoning_effort(raw: &str) -> Option<String> {
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "low" | "medium" | "high" | "xhigh" | "max" => Some(value),
+        _ => None,
     }
 }
 

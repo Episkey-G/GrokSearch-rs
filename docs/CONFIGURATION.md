@@ -24,13 +24,14 @@ Both carry the **same configuration values** — only the delivery differs. Ever
 | Grok API key | `GROK_SEARCH_API_KEY` | `X-Grok-Api-Key` |
 | Grok gateway URL | `GROK_SEARCH_URL` | `X-Grok-Base-Url` |
 | Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
+| Grok reasoning effort | `GROK_SEARCH_REASONING_EFFORT` | `X-Grok-Reasoning-Effort` |
 | Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
 | Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
 | TinyFish API key | `TINYFISH_API_KEY` | `X-Tinyfish-Api-Key` |
 | Exa API key | `EXA_API_KEY` | `X-Exa-Api-Key` |
 | GitHub token | `GITHUB_TOKEN` | `X-GitHub-Token` |
 
-Only these eight are accepted as headers — the caller's per-request secrets plus the gateway/model that pair with the caller's key. Most other settings here (timeouts, budgets, enrichment knobs, Tavily/Firecrawl base URLs, feature toggles) are **operator-fixed**: set once in the server's own environment, never per request. `GROK_SEARCH_URL` / `GROK_SEARCH_MODEL` have operator defaults too; the `X-Grok-Base-Url` / `X-Grok-Model` headers override them per request. **Two groups are stdio-only — stripped over HTTP, not operator-fixed:** OAuth (`GROK_SEARCH_AUTH_MODE` / `GROK_SEARCH_AUTH_FILE`) and the OpenAI-compatible chat-completions transport (`OPENAI_COMPATIBLE_API_URL` / `_API_KEY` / `_MODEL`). The remote server serves Grok **Responses** only; to run a chat-completions relay, use the stdio transport.
+Only these nine are accepted as headers — the caller's per-request secrets plus the gateway/model/reasoning that pair with the caller's key. Most other settings here (timeouts, budgets, enrichment knobs, Tavily/Firecrawl base URLs, feature toggles) are **operator-fixed**: set once in the server's own environment, never per request. `GROK_SEARCH_URL` / `GROK_SEARCH_MODEL` / `GROK_SEARCH_REASONING_EFFORT` have operator defaults too; the `X-Grok-Base-Url` / `X-Grok-Model` / `X-Grok-Reasoning-Effort` headers override them per request. **Two groups are stdio-only — stripped over HTTP, not operator-fixed:** OAuth (`GROK_SEARCH_AUTH_MODE` / `GROK_SEARCH_AUTH_FILE`) and the OpenAI-compatible chat-completions transport (`OPENAI_COMPATIBLE_API_URL` / `_API_KEY` / `_MODEL`). The remote server serves Grok **Responses** only; to run a chat-completions relay, use the stdio transport.
 
 The header is `X-` + the env key in `Kebab-Case`, but a few names are historical (the `GROK_SEARCH_` prefix collapses to `X-Grok-`, and `GROK_SEARCH_URL` → `X-Grok-Base-Url`) — **read names off the table above rather than deriving them by hand.**
 
@@ -73,6 +74,7 @@ Local (stdio) — the same values as `env`:
 | `GROK_SEARCH_AUTH_FILE` | `<home>/.config/grok-search-rs/auth.json` | Optional OAuth token file override. |
 | `GROK_SEARCH_URL` | `https://api.x.ai` | Root URL, `/v1` base URL, or endpoint-like URL. The service normalizes it to a `/v1` base. |
 | `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model sent in the Responses payload. |
+| `GROK_SEARCH_REASONING_EFFORT` | unset (provider default) | Optional reasoning intensity: `low` \| `medium` \| `high` \| `xhigh` \| `max`. Responses payload uses nested `reasoning.effort`; chat-completions uses top-level `reasoning_effort`. Overridable per request via `X-Grok-Reasoning-Effort` (HTTP) or the `web_search.reasoning_effort` tool arg (stdio + HTTP). |
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Sends Responses `{"type":"web_search"}`. |
 | `GROK_SEARCH_X_SEARCH` | `false` | Sends Responses `{"type":"x_search"}` only when enabled. |
 
@@ -233,6 +235,7 @@ Unknown keys are rejected by the loader — typos surface as parse errors instea
 | `grok_auth_mode` | `GROK_SEARCH_AUTH_MODE` |
 | `grok_auth_file` | `GROK_SEARCH_AUTH_FILE` |
 | `grok_model` | `GROK_SEARCH_MODEL` |
+| `reasoning_effort` | `GROK_SEARCH_REASONING_EFFORT` |
 | `web_search_enabled` | `GROK_SEARCH_WEB_SEARCH` |
 | `x_search_enabled` | `GROK_SEARCH_X_SEARCH` |
 | `tavily_api_url` | `TAVILY_API_URL` |

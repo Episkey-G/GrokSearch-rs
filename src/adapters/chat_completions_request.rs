@@ -44,5 +44,14 @@ pub fn to_chat_completions_payload(
     if include_web_search_tool {
         payload["tools"] = json!([{ "type": "web_search" }]);
     }
+    if let Some(effort) = req
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // OpenAI-compatible / xAI chat completions: top-level string.
+        payload["reasoning_effort"] = json!(effort);
+    }
     payload
 }

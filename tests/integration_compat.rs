@@ -34,6 +34,7 @@ async fn chat_completions_e2e_returns_text_and_sources() {
             )],
         }],
         tools: vec![SearchTool::web_search()],
+        reasoning_effort: None,
     };
 
     let resp = provider.search(&req).await.expect("e2e search");

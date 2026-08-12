@@ -11,6 +11,7 @@ fn sample_request() -> SearchRequest {
             content: vec![ContentBlock::text("latest OpenAI announcement")],
         }],
         tools: vec![SearchTool::web_search()],
+        reasoning_effort: None,
     }
 }
 
@@ -24,6 +25,18 @@ fn grok_responses_payload_includes_web_search_by_default() {
     assert_eq!(payload["input"][1]["role"], "user");
     assert_eq!(payload["tools"][0]["type"], "web_search");
     assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
+    assert!(
+        payload.get("reasoning").is_none(),
+        "reasoning must be omitted when effort is unset"
+    );
+}
+
+#[test]
+fn grok_responses_payload_includes_reasoning_effort_when_set() {
+    let mut req = sample_request();
+    req.reasoning_effort = Some("xhigh".into());
+    let payload = to_grok_responses_payload(&req, true, false).expect("payload");
+    assert_eq!(payload["reasoning"]["effort"], "xhigh");
 }
 
 #[test]

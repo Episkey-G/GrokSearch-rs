@@ -7,6 +7,11 @@ pub struct SearchRequest {
     pub system: Option<String>,
     pub messages: Vec<SearchMessage>,
     pub tools: Vec<SearchTool>,
+    /// Optional reasoning effort for Grok / OpenAI-compatible gateways.
+    /// Responses: `reasoning.effort`. Chat Completions: top-level `reasoning_effort`.
+    /// Values: `low` | `medium` | `high` | `xhigh` | `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

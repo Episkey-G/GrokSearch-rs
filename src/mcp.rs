@@ -165,6 +165,13 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
                     .get("response_format")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                // Per-call reasoning intensity. Validated/normalized here so a
+                // hallucinated value does not poison the upstream payload; bad
+                // values fall through to the server default.
+                reasoning_effort: args
+                    .get("reasoning_effort")
+                    .and_then(Value::as_str)
+                    .and_then(crate::config::parse_reasoning_effort),
             };
             let output = service.web_search(input).await?;
             Ok(serde_json::to_value(output)
@@ -266,6 +273,11 @@ fn tools_list() -> Value {
                             "type": "string",
                             "enum": ["concise", "detailed"],
                             "description": "concise = synthesized answer + source metadata only (smallest payload); detailed = inline source content, subject to the response budget. Takes precedence over include_content."
+                        },
+                        "reasoning_effort": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "xhigh", "max"],
+                            "description": "Optional per-call reasoning intensity for the Grok / OpenAI-compatible upstream. Responses sends reasoning.effort; chat-completions sends top-level reasoning_effort. low/medium/high are depth knobs; xhigh is multi-agent scale (e.g. grok-4.20-multi-agent); max is accepted for client compatibility. When omitted, uses GROK_SEARCH_REASONING_EFFORT / X-Grok-Reasoning-Effort, else the provider default."
                         }
                     }
                 }
@@ -577,5 +589,18 @@ mod tests {
             props.contains_key("response_format"),
             "response_format must remain: {props:?}"
         );
+        assert!(
+            props.contains_key("reasoning_effort"),
+            "reasoning_effort must be exposed: {props:?}"
+        );
+        let effort_enum = props["reasoning_effort"]["enum"]
+            .as_array()
+            .expect("reasoning_effort enum");
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            assert!(
+                effort_enum.iter().any(|v| v == level),
+                "missing {level} in {effort_enum:?}"
+            );
+        }
     }
 }

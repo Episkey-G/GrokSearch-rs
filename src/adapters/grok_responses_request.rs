@@ -42,10 +42,21 @@ pub fn to_grok_responses_payload(
         tools.push(json!({ "type": "x_search" }));
     }
 
-    Ok(json!({
+    let mut payload = json!({
         "model": req.model,
         "input": input,
         "tools": tools,
         "stream": false
-    }))
+    });
+    if let Some(effort) = req
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // xAI Responses API: nested `reasoning.effort` (chat uses top-level
+        // `reasoning_effort` — see chat_completions_request).
+        payload["reasoning"] = json!({ "effort": effort });
+    }
+    Ok(payload)
 }

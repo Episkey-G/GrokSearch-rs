@@ -2,6 +2,24 @@
 
 All notable changes to GrokSearch-rs are documented here.
 
+## Unreleased
+
+### Added
+
+- **Reasoning intensity (`reasoning_effort`).** Clients can pass
+  `low` / `medium` / `high` / `xhigh` / `max` three ways:
+  1. **Tool arg** (stdio + remote HTTP): `web_search.reasoning_effort`
+  2. **Server default**: env `GROK_SEARCH_REASONING_EFFORT`, TOML
+     `reasoning_effort`, or remote header `X-Grok-Reasoning-Effort`
+  3. Precedence: tool arg > header/env/config > omit (provider default)
+
+  Upstream mapping:
+  - Responses API → nested `reasoning.effort`
+  - OpenAI-compatible chat-completions → top-level `reasoning_effort`
+
+  Invalid values are ignored (fall through to the next layer). `doctor`
+  reports the effective server default under `grok.reasoning_effort`.
+
 ## 0.1.24 - 2026-08-05
 
 ### Added

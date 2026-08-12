@@ -20,6 +20,19 @@ fn config_reads_grok_search_responses_defaults() {
     assert_eq!(cfg.fallback_sources, 5);
     assert_eq!(cfg.timeout.as_secs(), 60);
     assert_eq!(cfg.grok_auth_mode, AuthMode::ApiKey);
+    assert_eq!(cfg.reasoning_effort, None);
+}
+
+#[test]
+fn config_reads_reasoning_effort() {
+    let cfg = Config::from_env_map([
+        ("GROK_SEARCH_API_KEY", "grok-test-key"),
+        ("GROK_SEARCH_REASONING_EFFORT", "XHigh"),
+    ]);
+    assert_eq!(cfg.reasoning_effort.as_deref(), Some("xhigh"));
+
+    let bad = Config::from_env_map([("GROK_SEARCH_REASONING_EFFORT", "ultra")]);
+    assert_eq!(bad.reasoning_effort, None);
 }
 
 #[test]
