@@ -59,7 +59,7 @@ pub struct Config {
     pub response_max_chars: usize,
     /// Default reasoning intensity for Grok/OpenAI-compatible upstreams.
     /// `None` = omit the field (provider default). Values:
-    /// `low` | `medium` | `high` | `xhigh` | `max`.
+    /// `low` | `medium` | `high` | `xhigh`.
     pub reasoning_effort: Option<String>,
 }
 
@@ -551,7 +551,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 
 # ── Common knobs ──────────────────────────────────────────────
 # grok_model         = "grok-4-1-fast-reasoning"
-# reasoning_effort   = "high"         # low|medium|high|xhigh|max (omit = provider default)
+# reasoning_effort   = "high"         # low|medium|high|xhigh (omit = provider default)
 # x_search_enabled   = false          # Grok X/Twitter search tool
 # firecrawl_api_key  = "fc-..."       # Optional fetch fallback   https://firecrawl.dev
 # tinyfish_api_key   = "tf-..."       # Optional free search/fetch  https://tinyfish.ai
@@ -694,7 +694,7 @@ fn auth_mode_value(map: &HashMap<String, String>) -> AuthMode {
 }
 
 /// Parse and normalize a reasoning-effort setting.
-/// Accepted: `low` | `medium` | `high` | `xhigh` | `max` (case-insensitive).
+/// Accepted: `low` | `medium` | `high` | `xhigh` (case-insensitive).
 /// Blank/absent → `None` (omit the field; provider default applies).
 /// Unknown values warn and fall back to `None`.
 fn reasoning_effort_value(map: &HashMap<String, String>, key: &str) -> Option<String> {
@@ -703,9 +703,7 @@ fn reasoning_effort_value(map: &HashMap<String, String>, key: &str) -> Option<St
         return None;
     }
     parse_reasoning_effort(raw).or_else(|| {
-        eprintln!(
-            "unknown {key}=\"{raw}\"; ignoring. Valid values: low, medium, high, xhigh, max."
-        );
+        eprintln!("unknown {key}=\"{raw}\"; ignoring. Valid values: low, medium, high, xhigh.");
         None
     })
 }
@@ -715,7 +713,7 @@ fn reasoning_effort_value(map: &HashMap<String, String>, key: &str) -> Option<St
 pub fn parse_reasoning_effort(raw: &str) -> Option<String> {
     let value = raw.trim().to_ascii_lowercase();
     match value.as_str() {
-        "low" | "medium" | "high" | "xhigh" | "max" => Some(value),
+        "low" | "medium" | "high" | "xhigh" => Some(value),
         _ => None,
     }
 }

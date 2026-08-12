@@ -74,7 +74,7 @@ Local (stdio) — the same values as `env`:
 | `GROK_SEARCH_AUTH_FILE` | `<home>/.config/grok-search-rs/auth.json` | Optional OAuth token file override. |
 | `GROK_SEARCH_URL` | `https://api.x.ai` | Root URL, `/v1` base URL, or endpoint-like URL. The service normalizes it to a `/v1` base. |
 | `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model sent in the Responses payload. |
-| `GROK_SEARCH_REASONING_EFFORT` | unset (provider default) | Optional reasoning intensity: `low` \| `medium` \| `high` \| `xhigh` \| `max`. Responses payload uses nested `reasoning.effort`; chat-completions uses top-level `reasoning_effort`. Overridable per request via `X-Grok-Reasoning-Effort` (HTTP) or the `web_search.reasoning_effort` tool arg (stdio + HTTP). |
+| `GROK_SEARCH_REASONING_EFFORT` | unset (provider default) | Optional reasoning intensity: `low` | `medium` | `high` | `xhigh`. Responses payload uses nested `reasoning.effort`; chat-completions uses top-level `reasoning_effort`. Overridable per request via `X-Grok-Reasoning-Effort` (HTTP) or the `web_search.reasoning_effort` tool arg (stdio + HTTP). |
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Sends Responses `{"type":"web_search"}`. |
 | `GROK_SEARCH_X_SEARCH` | `false` | Sends Responses `{"type":"x_search"}` only when enabled. |
 

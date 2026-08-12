@@ -276,8 +276,8 @@ fn tools_list() -> Value {
                         },
                         "reasoning_effort": {
                             "type": "string",
-                            "enum": ["low", "medium", "high", "xhigh", "max"],
-                            "description": "Optional per-call reasoning intensity for the Grok / OpenAI-compatible upstream. Responses sends reasoning.effort; chat-completions sends top-level reasoning_effort. low/medium/high are depth knobs; xhigh is multi-agent scale (e.g. grok-4.20-multi-agent); max is accepted for client compatibility. When omitted, uses GROK_SEARCH_REASONING_EFFORT / X-Grok-Reasoning-Effort, else the provider default."
+                            "enum": ["low", "medium", "high", "xhigh"],
+                            "description": "Optional per-call reasoning intensity for the Grok / OpenAI-compatible upstream. Responses sends reasoning.effort; chat-completions sends top-level reasoning_effort. low/medium/high are depth knobs; xhigh is multi-agent scale (e.g. grok-4.20-multi-agent). When omitted, uses GROK_SEARCH_REASONING_EFFORT / X-Grok-Reasoning-Effort, else the provider default."
                         }
                     }
                 }
@@ -596,7 +596,7 @@ mod tests {
         let effort_enum = props["reasoning_effort"]["enum"]
             .as_array()
             .expect("reasoning_effort enum");
-        for level in ["low", "medium", "high", "xhigh", "max"] {
+        for level in ["low", "medium", "high", "xhigh"] {
             assert!(
                 effort_enum.iter().any(|v| v == level),
                 "missing {level} in {effort_enum:?}"

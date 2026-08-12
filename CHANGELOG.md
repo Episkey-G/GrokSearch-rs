@@ -7,7 +7,7 @@ All notable changes to GrokSearch-rs are documented here.
 ### Added
 
 - **Reasoning intensity (`reasoning_effort`).** Clients can pass
-  `low` / `medium` / `high` / `xhigh` / `max` three ways:
+  `low` / `medium` / `high` / `xhigh` three ways:
   1. **Tool arg** (stdio + remote HTTP): `web_search.reasoning_effort`
   2. **Server default**: env `GROK_SEARCH_REASONING_EFFORT`, TOML
      `reasoning_effort`, or remote header `X-Grok-Reasoning-Effort`

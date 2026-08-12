@@ -9,7 +9,7 @@ pub struct SearchRequest {
     pub tools: Vec<SearchTool>,
     /// Optional reasoning effort for Grok / OpenAI-compatible gateways.
     /// Responses: `reasoning.effort`. Chat Completions: top-level `reasoning_effort`.
-    /// Values: `low` | `medium` | `high` | `xhigh` | `max`.
+    /// Values: `low` | `medium` | `high` | `xhigh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }
