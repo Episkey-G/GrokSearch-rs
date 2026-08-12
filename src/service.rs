@@ -1285,6 +1285,7 @@ impl SearchService {
                     .unwrap_or_else(|| "unavailable".to_string()),
                 "web_search_enabled": self.config.web_search_enabled,
                 "x_search_enabled": ai_x_search_enabled,
+                "reasoning_effort": self.config.reasoning_effort,
                 "reachable": grok_probe.ok,
                 "detail": grok_probe.detail,
             },
@@ -1358,6 +1359,7 @@ impl SearchService {
                 content: vec![ContentBlock::text("ping")],
             }],
             tools,
+            reasoning_effort: self.config.reasoning_effort.clone(),
         };
         match self.ai.search(&request).await {
             Ok(_) => Probe::ok("grok responded"),
@@ -1412,6 +1414,11 @@ impl SearchService {
                 content: vec![ContentBlock::text(content)],
             }],
             tools: vec![SearchTool::web_search()],
+            // Per-call tool arg wins; else operator/server default (env/header/config).
+            reasoning_effort: input
+                .reasoning_effort
+                .clone()
+                .or_else(|| self.config.reasoning_effort.clone()),
         }
     }
 }

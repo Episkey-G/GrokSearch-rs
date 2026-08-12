@@ -117,6 +117,7 @@ The MCP **transport** decides how config reaches the server — same values, dif
 | Grok API key | `GROK_SEARCH_API_KEY` | `X-Grok-Api-Key` |
 | Grok gateway URL | `GROK_SEARCH_URL` | `X-Grok-Base-Url` |
 | Grok model | `GROK_SEARCH_MODEL` | `X-Grok-Model` |
+| Grok reasoning effort | `GROK_SEARCH_REASONING_EFFORT` | `X-Grok-Reasoning-Effort` |
 | Tavily API key | `TAVILY_API_KEY` | `X-Tavily-Api-Key` |
 | Firecrawl API key | `FIRECRAWL_API_KEY` | `X-Firecrawl-Api-Key` |
 | TinyFish API key | `TINYFISH_API_KEY` | `X-Tinyfish-Api-Key` |
@@ -134,6 +135,7 @@ The tables below use env-key names (they also drive `config.toml` / stdio); on t
 | `GROK_SEARCH_AUTH_FILE` | `<home>/.config/grok-search-rs/auth.json` | Optional OAuth token file override. |
 | `GROK_SEARCH_URL` | `https://api.x.ai` | Root, `/v1`, or full‑endpoint URL. |
 | `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model name. |
+| `GROK_SEARCH_REASONING_EFFORT` | — *(provider default)* | `low`/`medium`/`high`/`xhigh`. Also overridable via `web_search.reasoning_effort` or `X-Grok-Reasoning-Effort`. |
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Offer `web_search` tool to Grok. |
 | `GROK_SEARCH_X_SEARCH` | `false` | Offer `x_search` tool (X/Twitter) to Grok. |
 
@@ -255,7 +257,7 @@ request carries the caller's own keys as headers, so many users can share one en
 each pays with their own keys:
 
 - `X-Grok-Api-Key`, `X-Tavily-Api-Key`, `X-Firecrawl-Api-Key` (optional `X-GitHub-Token`)
-- Optional non‑secret overrides: `X-Grok-Base-Url` (gateway), `X-Grok-Model` (model name, since model ids are gateway‑specific)
+- Optional non‑secret overrides: `X-Grok-Base-Url` (gateway), `X-Grok-Model` (model name, since model ids are gateway‑specific), `X-Grok-Reasoning-Effort` (`low`/`medium`/`high`/`xhigh`)
 
 This cuts both ways: setting `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in the **server's** own
 environment (compose file, `.env`, systemd unit) has no effect — those are stripped from every

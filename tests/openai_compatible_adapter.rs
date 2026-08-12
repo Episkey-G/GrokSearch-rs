@@ -11,6 +11,7 @@ fn sample_request() -> SearchRequest {
             content: vec![ContentBlock::text("hello")],
         }],
         tools: vec![SearchTool::web_search()],
+        reasoning_effort: None,
     }
 }
 
@@ -23,6 +24,18 @@ fn payload_includes_tools_when_web_search_enabled() {
     assert_eq!(payload["messages"][0]["role"], "system");
     assert_eq!(payload["messages"][1]["role"], "user");
     assert_eq!(payload["messages"][1]["content"], "hello");
+    assert!(
+        payload.get("reasoning_effort").is_none(),
+        "reasoning_effort must be omitted when unset"
+    );
+}
+
+#[test]
+fn payload_includes_reasoning_effort_when_set() {
+    let mut req = sample_request();
+    req.reasoning_effort = Some("high".into());
+    let payload = to_chat_completions_payload(&req, "grok-4.3-fast", true);
+    assert_eq!(payload["reasoning_effort"], "high");
 }
 
 #[test]

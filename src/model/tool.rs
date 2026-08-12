@@ -19,6 +19,10 @@ pub struct WebSearchInput {
     /// content, subject to the response budget). When set, takes precedence
     /// over the legacy `include_content` flag.
     pub response_format: Option<String>,
+    /// Per-call reasoning intensity override: `low` | `medium` | `high` |
+    /// `xhigh`. When set, beats the server default
+    /// (`GROK_SEARCH_REASONING_EFFORT` / `X-Grok-Reasoning-Effort`).
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
