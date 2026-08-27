@@ -57,6 +57,47 @@ pub struct Config {
     pub enrich_max_chars: usize,
     pub max_inline_sources: usize,
     pub response_max_chars: usize,
+    /// Where the config file was looked for, whether or not one was there.
+    /// Worth reporting even when absent — it tells the operator where to put
+    /// one.
+    pub config_file_path: Option<PathBuf>,
+    /// What became of that file. Rejection is deliberate — one unknown key
+    /// voids the whole file rather than half-applying it — but the only sign
+    /// of it used to be a line on stderr, which an MCP client swallows,
+    /// leaving the operator staring at defaults with no way to learn why.
+    pub config_file_state: ConfigFileState,
+}
+
+/// The outcome of loading the config file.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ConfigFileState {
+    /// Nothing at the resolved path, or no path could be resolved. Not a
+    /// failure: running purely on environment variables is normal.
+    #[default]
+    Absent,
+    Loaded,
+    /// Present but unusable, with the reason attached verbatim so the operator
+    /// sees which key or line is at fault.
+    Rejected(String),
+}
+
+impl ConfigFileState {
+    /// Stable label for diagnostics output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConfigFileState::Absent => "absent",
+            ConfigFileState::Loaded => "loaded",
+            ConfigFileState::Rejected(_) => "rejected",
+        }
+    }
+
+    /// The rejection reason, if this is a rejection.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            ConfigFileState::Rejected(detail) => Some(detail),
+            _ => None,
+        }
+    }
 }
 
 /// Hand-written `Debug` that masks secret-bearing fields so a stray
@@ -113,6 +154,8 @@ impl std::fmt::Debug for Config {
             .field("enrich_max_chars", &self.enrich_max_chars)
             .field("max_inline_sources", &self.max_inline_sources)
             .field("response_max_chars", &self.response_max_chars)
+            .field("config_file_path", &self.config_file_path)
+            .field("config_file_state", &self.config_file_state)
             .finish()
     }
 }
@@ -280,10 +323,15 @@ impl Config {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
-        let file_map = resolve_config_path(&env_map)
-            .and_then(|path| load_file_map(&path))
-            .unwrap_or_default();
-        Self::from_env_map(merge_env_over_file(file_map, env_map))
+        let path = resolve_config_path(&env_map);
+        let (file_map, config_file_state) = match path.as_deref() {
+            Some(path) => read_config_file(path),
+            None => (HashMap::new(), ConfigFileState::Absent),
+        };
+        let mut config = Self::from_env_map(merge_env_over_file(file_map, env_map));
+        config.config_file_path = path;
+        config.config_file_state = config_file_state;
+        config
     }
 
     pub fn from_env() -> Self {
@@ -387,6 +435,10 @@ impl Config {
             enrich_max_chars: usize_value(&map, "GROK_SEARCH_ENRICH_MAX_CHARS", 15000),
             max_inline_sources: usize_value(&map, "GROK_SEARCH_MAX_INLINE_SOURCES", 5),
             response_max_chars: usize_value(&map, "GROK_SEARCH_RESPONSE_MAX_CHARS", 45_000),
+            // This is the environment-only constructor; no file was consulted.
+            // `load_from` overwrites both after merging one in.
+            config_file_path: None,
+            config_file_state: ConfigFileState::Absent,
         }
     }
 
@@ -589,17 +641,30 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # response_max_chars    = 45000      # whole-response char budget (answer + inline content); kept below the MCP client token ceiling (default ~25k tokens) after JSON serialization
 "#;
 
-fn load_file_map(path: &Path) -> Option<HashMap<String, String>> {
-    let body = std::fs::read_to_string(path).ok()?;
+/// Read and parse the config file, reporting what happened alongside whatever
+/// values survived. A missing file is `Absent`, not a failure — running purely
+/// on environment variables is normal. Anything present but unusable is
+/// `Rejected` with the reason attached, so the caller can surface it somewhere
+/// the operator will actually look.
+fn read_config_file(path: &Path) -> (HashMap<String, String>, ConfigFileState) {
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (HashMap::new(), ConfigFileState::Absent)
+        }
+        Err(err) => return (HashMap::new(), ConfigFileState::Rejected(err.to_string())),
+    };
     match toml::from_str::<ConfigFile>(&body) {
-        Ok(file) => Some(file.into_env_map()),
+        Ok(file) => (file.into_env_map(), ConfigFileState::Loaded),
         Err(err) => {
+            // Kept for anyone running the binary directly; the recorded state
+            // is what reaches an MCP client.
             eprintln!(
                 "grok-search-rs: ignoring malformed config {}: {}",
                 path.display(),
                 err
             );
-            None
+            (HashMap::new(), ConfigFileState::Rejected(err.to_string()))
         }
     }
 }
