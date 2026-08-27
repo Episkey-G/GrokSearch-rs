@@ -3,6 +3,14 @@ use crate::model::tool::WebSearchInput;
 use crate::service::SearchService;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::task::JoinSet;
+
+/// Requests handled at once. Unbounded fan-out would let one runaway client
+/// drive the upstream into the rate limits this concurrency exists to relieve.
+/// Excess requests wait rather than being refused: queueing is the right answer
+/// for a single local client, whereas the multi-tenant HTTP transport has its
+/// own overload response.
+const MAX_IN_FLIGHT: usize = 8;
 
 /// Bind the request loop to the process's stdin/stdout. Binding is all this
 /// does; every decision about what a message means lives in [`serve`].
@@ -23,27 +31,60 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut lines = BufReader::new(reader).lines();
+    let mut in_flight: JoinSet<Option<Value>> = JoinSet::new();
+    let mut reading = true;
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(err) => {
-                let response = error_response(Value::Null, -32700, format!("parse error: {err}"));
-                writer.write_all(response.to_string().as_bytes()).await?;
-                writer.write_all(b"\n").await?;
-                continue;
+    // Only this loop ever touches the writer, so serialization of responses is
+    // structural: two handlers cannot interleave halves of a line no matter how
+    // they overlap. Responses leave in completion order, which JSON-RPC allows
+    // because every one carries the `id` it answers.
+    while reading || !in_flight.is_empty() {
+        tokio::select! {
+            // Reading pauses at the cap. That is what makes a burst queue here
+            // instead of arriving at the upstream all at once.
+            line = lines.next_line(), if reading && in_flight.len() < MAX_IN_FLIGHT => {
+                match line? {
+                    None => reading = false,
+                    Some(line) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        match serde_json::from_str::<Value>(&line) {
+                            Ok(request) => {
+                                let service = service.clone();
+                                in_flight
+                                    .spawn(async move { handle_message(&service, request).await });
+                            }
+                            Err(err) => {
+                                let response = error_response(
+                                    Value::Null,
+                                    -32700,
+                                    format!("parse error: {err}"),
+                                );
+                                write_line(&mut writer, &response).await?;
+                            }
+                        }
+                    }
+                }
             }
-        };
-
-        if let Some(response) = handle_message(&service, request).await {
-            writer.write_all(response.to_string().as_bytes()).await?;
-            writer.write_all(b"\n").await?;
+            Some(finished) = in_flight.join_next() => {
+                if let Some(response) = finished? {
+                    write_line(&mut writer, &response).await?;
+                }
+            }
         }
     }
 
+    Ok(())
+}
+
+/// One response per line, written whole.
+async fn write_line<W>(writer: &mut W, response: &Value) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(response.to_string().as_bytes()).await?;
+    writer.write_all(b"\n").await?;
     Ok(())
 }
 
@@ -381,6 +422,11 @@ pub(crate) fn error_response(id: Value, code: i64, message: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::search::SearchFilters;
+    use crate::model::source::{FetchedPage, Source};
+    use crate::service::SourceProvider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn initialized_notification_does_not_emit_response() {
@@ -599,7 +645,12 @@ mod tests {
     /// test below observes the loop only through what a client would see:
     /// bytes in, response lines out.
     async fn drive(input: &str) -> Vec<Value> {
-        let service = SearchService::fake_with_sources();
+        drive_with(SearchService::fake_with_sources(), input).await
+    }
+
+    /// Same, with a caller-supplied service so a test can inject a provider
+    /// that reports what the loop is doing while it runs.
+    async fn drive_with(service: SearchService, input: &str) -> Vec<Value> {
         let mut output: Vec<u8> = Vec::new();
         serve(service, input.as_bytes(), &mut output)
             .await
@@ -610,6 +661,140 @@ mod tests {
             .filter(|line| !line.trim().is_empty())
             .map(|line| serde_json::from_str(line).expect("each response line is json"))
             .collect()
+    }
+
+    /// A source provider that sleeps for the number of milliseconds named by
+    /// the query, recording how many calls are in flight at once. Asserting on
+    /// the peak says whether requests actually overlapped, without depending
+    /// on wall-clock ordering the way a duration comparison would.
+    #[derive(Clone, Default)]
+    struct ConcurrencyProbe {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl ConcurrencyProbe {
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+
+        fn provider(&self) -> Arc<dyn SourceProvider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SourceProvider for ConcurrencyProbe {
+        async fn search_sources(
+            &self,
+            query: &str,
+            _max_results: usize,
+            _filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(query.parse().unwrap_or(0))).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn fetch(&self, url: &str) -> Result<FetchedPage> {
+            Err(GrokSearchError::Provider(format!("no fetch for {url}")))
+        }
+
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A `web_search` call whose query is the number of milliseconds the probe
+    /// should spend on it. `extra_sources: 0` keeps enrichment out of the way
+    /// so the delay is the only thing the test is timing.
+    fn probe_request(id: u64, delay_millis: u64) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search",
+                "arguments": { "query": delay_millis.to_string(), "extra_sources": 0 }
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn serve_handles_requests_concurrently() {
+        let probe = ConcurrencyProbe::default();
+        let service = SearchService::fake_custom(None, probe.provider(), None, [("", "")]);
+
+        let responses = drive_with(
+            service,
+            &format!("{}\n{}\n", probe_request(1, 150), probe_request(2, 150)),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert!(
+            probe.peak() >= 2,
+            "requests were handled one at a time; peak in flight was {}",
+            probe.peak()
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_answers_in_completion_order_with_ids_intact() {
+        let probe = ConcurrencyProbe::default();
+        let service = SearchService::fake_custom(None, probe.provider(), None, [("", "")]);
+
+        // The slow request arrives first. A client that follows it with a quick
+        // one must not wait out the slow one to hear back.
+        let responses = drive_with(
+            service,
+            &format!("{}\n{}\n", probe_request(1, 250), probe_request(2, 0)),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(
+            responses[0]["id"], 2,
+            "the quick request queued behind the slow one: {responses:?}"
+        );
+        assert_eq!(responses[1]["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn serve_caps_in_flight_requests_without_dropping_any() {
+        let probe = ConcurrencyProbe::default();
+        let service = SearchService::fake_custom(None, probe.provider(), None, [("", "")]);
+
+        let burst: String = (1..=12)
+            .map(|id| format!("{}\n", probe_request(id, 80)))
+            .collect();
+        let responses = drive_with(service, &burst).await;
+
+        // Answered, all of them: over the cap means wait, never refuse or drop.
+        let mut ids: Vec<u64> = responses
+            .iter()
+            .map(|response| {
+                response["id"]
+                    .as_u64()
+                    .expect("every response carries an id")
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=12).collect::<Vec<u64>>(), "{responses:?}");
+
+        assert!(
+            probe.peak() <= MAX_IN_FLIGHT,
+            "cap of {MAX_IN_FLIGHT} exceeded: peak in flight was {}",
+            probe.peak()
+        );
+        assert!(
+            probe.peak() > 1,
+            "a burst this size should overlap: peak in flight was {}",
+            probe.peak()
+        );
     }
 
     #[tokio::test]
