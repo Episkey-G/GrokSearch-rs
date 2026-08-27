@@ -1,9 +1,19 @@
 # grok-search-rs
 
-Run the GrokSearch-rs MCP server with npx:
+Install the native GrokSearch-rs MCP server and run its guided setup:
 
 ```bash
-npx grok-search-rs
+npm install -g grok-search-rs
+grok-search-rs setup
 ```
 
-See https://github.com/Episkey-G/GrokSearch-rs for configuration and MCP client examples.
+The wizard creates one shared config, then prints a key-free Claude Code or Codex
+registration command. Diagnose configuration and configured providers with:
+
+```bash
+grok-search-rs doctor
+grok-search-rs doctor --json
+```
+
+See https://github.com/Episkey-G/GrokSearch-rs for transport details, manual
+configuration, and MCP tool examples.

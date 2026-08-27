@@ -1,3 +1,5 @@
+mod quality_gate;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -449,22 +451,33 @@ impl SearchService {
     }
 
     pub async fn web_search(&self, input: WebSearchInput) -> Result<WebSearchOutput> {
+        // Resolve the inline-content contract once, here, so the shadow
+        // observer records the flag the search actually ran with instead of
+        // mirroring the same rule a second time.
+        let include_content = resolve_include_content(&input)?;
+        let observation = self
+            .config
+            .quality_gate_shadow_enabled
+            .then(|| quality_gate::ObservationInput::new(&input, include_content));
+        let started_at = observation.as_ref().map(|_| std::time::Instant::now());
+        let result = self.web_search_inner(input, include_content).await;
+
+        if let (Some(observation), Some(started_at), Ok(output)) =
+            (observation.as_ref(), started_at, result.as_ref())
+        {
+            quality_gate::observe(observation, output, started_at.elapsed());
+        }
+
+        result
+    }
+
+    async fn web_search_inner(
+        &self,
+        input: WebSearchInput,
+        include_content: bool,
+    ) -> Result<WebSearchOutput> {
         // D-02: single global deadline shared by Grok + supplemental fetch + enrichment.
         let deadline = tokio::time::Instant::now() + self.config.timeout;
-        // response_format (Anthropic tool-design guidance: concise|detailed)
-        // wins over the legacy include_content flag when both are present.
-        let format_include_content = match input.response_format.as_deref() {
-            None => None,
-            Some("concise") => Some(false),
-            Some("detailed") => Some(true),
-            Some(other) => {
-                return Err(GrokSearchError::InvalidParams(format!(
-                    "response_format must be \"concise\" or \"detailed\", got \"{other}\""
-                )))
-            }
-        };
-        let include_content =
-            format_include_content.unwrap_or_else(|| input.include_content.unwrap_or(true));
 
         let mut uuid_buf = [0u8; uuid::fmt::Simple::LENGTH];
         let session_id = {
@@ -798,15 +811,22 @@ impl SearchService {
     /// Returns provider availability flags, masked config, and per-provider reachability.
     pub async fn doctor(&self) -> serde_json::Value {
         use crate::config::Transport;
-        let grok_probe = self.probe_grok().await;
-        let tavily_probe = match &self.sources {
-            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
-            None => Probe::skipped("TAVILY_API_KEY not configured"),
+        // Probe configured backends concurrently so a diagnostic waits for at
+        // most one configured timeout window rather than one per provider.
+        let tavily_probe = async {
+            match &self.sources {
+                Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
+                None => Probe::skipped("TAVILY_API_KEY not configured"),
+            }
         };
-        let firecrawl_probe = match &self.fallback_sources {
-            Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
-            None => Probe::skipped("FIRECRAWL_API_KEY not configured"),
+        let firecrawl_probe = async {
+            match &self.fallback_sources {
+                Some(provider) => probe_source(provider.as_ref(), "https://example.com").await,
+                None => Probe::skipped("FIRECRAWL_API_KEY not configured"),
+            }
         };
+        let (grok_probe, tavily_probe, firecrawl_probe) =
+            tokio::join!(self.probe_grok(), tavily_probe, firecrawl_probe);
 
         // Surface the AI transport that the service actually dispatches to so
         // doctor() stays truthful when callers point us at an OpenAI-compatible
@@ -953,6 +973,23 @@ enum RawSourceOrigin {
     None,
     Primary,
     Fallback,
+}
+
+/// Single source of truth for the effective inline-content flag.
+///
+/// `response_format` (Anthropic tool-design guidance: `concise`|`detailed`)
+/// wins over the legacy `include_content` flag when both are present. Every
+/// consumer — the search itself and the shadow quality gate — must read the
+/// flag through this function so the rule can never be mirrored and drift.
+fn resolve_include_content(input: &WebSearchInput) -> Result<bool> {
+    match input.response_format.as_deref() {
+        None => Ok(input.include_content.unwrap_or(true)),
+        Some("concise") => Ok(false),
+        Some("detailed") => Ok(true),
+        Some(other) => Err(GrokSearchError::InvalidParams(format!(
+            "response_format must be \"concise\" or \"detailed\", got \"{other}\""
+        ))),
+    }
 }
 
 /// Pick the model the active transport actually understands. Responses speaks

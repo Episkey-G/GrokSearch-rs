@@ -35,6 +35,7 @@ ring = "0.17"
 url = "2"
 percent-encoding = "2"
 quick-xml = { version = "0.37", default-features = false, features = ["encoding"] }
+rpassword = "=7.4.0"
 axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1", "json"] }
 
 [features]

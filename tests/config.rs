@@ -1,6 +1,6 @@
 use std::fs;
 
-use grok_search_rs::config::{self, AuthMode, Config, InitOutcome, Transport};
+use grok_search_rs::config::{self, AuthMode, Config, ConfigFileState, InitOutcome, Transport};
 use tempfile::tempdir;
 
 #[test]
@@ -20,6 +20,7 @@ fn config_reads_grok_search_responses_defaults() {
     assert_eq!(cfg.fallback_sources, 5);
     assert_eq!(cfg.timeout.as_secs(), 60);
     assert_eq!(cfg.grok_auth_mode, AuthMode::ApiKey);
+    assert!(!cfg.quality_gate_shadow_enabled);
 }
 
 #[test]
@@ -263,6 +264,7 @@ fallback_sources      = 9
 fetch_max_chars       = 12345
 cache_size            = 128
 timeout_seconds       = 30
+quality_gate_shadow_enabled = true
 "#,
     )
     .unwrap();
@@ -292,6 +294,7 @@ timeout_seconds       = 30
     assert_eq!(cfg.fetch_max_chars, Some(12345));
     assert_eq!(cfg.cache_size, 128);
     assert_eq!(cfg.timeout.as_secs(), 30);
+    assert!(cfg.quality_gate_shadow_enabled);
 }
 
 #[test]
@@ -344,6 +347,16 @@ fn fresh_template_does_not_override_defaults_or_supply_credentials() {
     assert!(!cfg.x_search_enabled);
     assert!(cfg.tavily_enabled);
     assert!(cfg.firecrawl_enabled);
+    assert!(!cfg.quality_gate_shadow_enabled);
+}
+
+#[test]
+fn quality_gate_shadow_is_opt_in_from_env() {
+    let enabled = Config::from_env_map([("GROK_SEARCH_QUALITY_GATE_SHADOW", "true")]);
+    assert!(enabled.quality_gate_shadow_enabled);
+
+    let disabled = Config::from_env_map([("GROK_SEARCH_QUALITY_GATE_SHADOW", "false")]);
+    assert!(!disabled.quality_gate_shadow_enabled);
 }
 
 #[test]
@@ -450,4 +463,227 @@ fn response_budget_defaults_and_env_overrides() {
     ]);
     assert_eq!(overridden.max_inline_sources, 2);
     assert_eq!(overridden.response_max_chars, 30_000);
+}
+
+#[test]
+fn whitespace_credentials_are_unset_before_transport_selection() {
+    let cfg = Config::from_env_map([
+        ("GROK_SEARCH_API_KEY", "   "),
+        ("OPENAI_COMPATIBLE_API_URL", " https://compat.example/v1 "),
+        ("OPENAI_COMPATIBLE_API_KEY", " sk-compatible "),
+        ("TAVILY_API_KEY", " \t "),
+        ("FIRECRAWL_API_KEY", "\n"),
+        ("GITHUB_TOKEN", "  "),
+    ]);
+
+    assert_eq!(cfg.transport, Transport::ChatCompletions);
+    assert!(cfg.grok_api_key.is_none());
+    assert_eq!(
+        cfg.openai_compatible_api_url.as_deref(),
+        Some("https://compat.example/v1")
+    );
+    assert_eq!(
+        cfg.openai_compatible_api_key.as_deref(),
+        Some("sk-compatible")
+    );
+    assert!(cfg.tavily_api_key.is_none());
+    assert!(cfg.firecrawl_api_key.is_none());
+    assert!(cfg.github_token.is_none());
+}
+
+#[test]
+fn has_ai_credential_follows_the_selected_transport() {
+    assert!(!Config::from_env_map(Vec::<(String, String)>::new()).has_ai_credential());
+    assert!(Config::from_env_map([("GROK_SEARCH_API_KEY", "xai-key")]).has_ai_credential());
+    assert!(Config::from_env_map([("GROK_SEARCH_AUTH_MODE", "oauth")]).has_ai_credential());
+    assert!(!Config::from_env_map([("GROK_SEARCH_API_KEY", "   ")]).has_ai_credential());
+
+    // A half-configured compatible pair leaves the transport on Responses with
+    // no Grok key, so it must not read as configured.
+    assert!(
+        !Config::from_env_map([("OPENAI_COMPATIBLE_API_URL", "https://compat.example")])
+            .has_ai_credential()
+    );
+    assert!(
+        !Config::from_env_map([("OPENAI_COMPATIBLE_API_KEY", "sk-compatible")]).has_ai_credential()
+    );
+
+    let compatible = Config::from_env_map([
+        ("OPENAI_COMPATIBLE_API_URL", "https://compat.example"),
+        ("OPENAI_COMPATIBLE_API_KEY", "sk-compatible"),
+    ]);
+    assert_eq!(compatible.transport, Transport::ChatCompletions);
+    assert!(compatible.has_ai_credential());
+}
+
+#[test]
+fn config_file_state_has_stable_string_values() {
+    assert_eq!(ConfigFileState::Unresolved.as_str(), "unresolved");
+    assert_eq!(ConfigFileState::Missing.as_str(), "missing");
+    assert_eq!(ConfigFileState::Loaded.as_str(), "loaded");
+    assert_eq!(ConfigFileState::Malformed.as_str(), "malformed");
+    assert_eq!(ConfigFileState::Unreadable.as_str(), "unreadable");
+}
+
+#[test]
+fn diagnostics_reports_unresolved_path() {
+    let loaded = Config::load_with_diagnostics_from([] as [(&str, &str); 0]);
+
+    assert_eq!(loaded.file_state, ConfigFileState::Unresolved);
+    assert!(loaded.config_path.is_none());
+    assert!(loaded.file_issue.is_none());
+    assert_eq!(loaded.config.grok_model, "grok-4-1-fast-reasoning");
+}
+
+#[test]
+fn diagnostics_reports_missing_file_and_keeps_env() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("missing.toml");
+    let loaded = Config::load_with_diagnostics_from([
+        ("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string()),
+        ("GROK_SEARCH_API_KEY", "xai-from-env".to_string()),
+    ]);
+
+    assert_eq!(loaded.file_state, ConfigFileState::Missing);
+    assert_eq!(loaded.config_path.as_deref(), Some(path.as_path()));
+    assert!(loaded.file_issue.is_none());
+    assert_eq!(loaded.config.grok_api_key.as_deref(), Some("xai-from-env"));
+}
+
+#[test]
+fn diagnostics_reports_malformed_file_without_exposing_contents() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "grok_api_key = \"xai-secret-must-not-leak\"\nbroken = [\n",
+    )
+    .unwrap();
+
+    let loaded = Config::load_with_diagnostics_from([
+        ("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string()),
+        ("GROK_SEARCH_API_KEY", "xai-from-env".to_string()),
+    ]);
+
+    assert_eq!(loaded.file_state, ConfigFileState::Malformed);
+    assert_eq!(loaded.config_path.as_deref(), Some(path.as_path()));
+    let issue = loaded.file_issue.expect("parse issue");
+    assert!(!issue.contains("xai-secret-must-not-leak"));
+    assert_eq!(loaded.config.grok_api_key.as_deref(), Some("xai-from-env"));
+}
+
+#[test]
+fn diagnostics_reports_unreadable_path_and_keeps_env() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config-as-directory");
+    fs::create_dir(&path).unwrap();
+
+    let loaded = Config::load_with_diagnostics_from([
+        ("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string()),
+        ("GROK_SEARCH_MODEL", "model-from-env".to_string()),
+    ]);
+
+    assert_eq!(loaded.file_state, ConfigFileState::Unreadable);
+    assert_eq!(loaded.config_path.as_deref(), Some(path.as_path()));
+    assert!(loaded.file_issue.is_some());
+    assert_eq!(loaded.config.grok_model, "model-from-env");
+}
+
+#[test]
+fn diagnostics_loads_file_then_applies_env_precedence() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+grok_api_key = "xai-from-file"
+grok_model = "model-from-file"
+tavily_api_key = "tvly-from-file"
+"#,
+    )
+    .unwrap();
+
+    let loaded = Config::load_with_diagnostics_from([
+        ("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string()),
+        ("GROK_SEARCH_API_KEY", "xai-from-env".to_string()),
+        ("GROK_SEARCH_MODEL", "model-from-env".to_string()),
+    ]);
+
+    assert_eq!(loaded.file_state, ConfigFileState::Loaded);
+    assert_eq!(loaded.config_path.as_deref(), Some(path.as_path()));
+    assert!(loaded.file_issue.is_none());
+    assert_eq!(loaded.config.grok_api_key.as_deref(), Some("xai-from-env"));
+    assert_eq!(loaded.config.grok_model, "model-from-env");
+    assert_eq!(
+        loaded.config.tavily_api_key.as_deref(),
+        Some("tvly-from-file")
+    );
+}
+
+#[test]
+fn private_config_is_create_only_and_cleans_up_temporary_file() {
+    let dir = tempdir().unwrap();
+    let parent = dir.path().join("private");
+    let path = parent.join("config.toml");
+    let original = "grok_api_key = \"xai-original\"\n";
+
+    assert_eq!(
+        config::write_private_config(&path, original).unwrap(),
+        InitOutcome::Created
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(
+        config::write_private_config(&path, "grok_api_key = \"xai-replacement\"\n").unwrap(),
+        InitOutcome::AlreadyExists
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    let entries: Vec<_> = fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("config.toml")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_config_uses_owner_only_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let parent = dir.path().join("private");
+    let path = parent.join("config.toml");
+    config::write_private_config(&path, "grok_api_key = \"xai-private\"\n").unwrap();
+
+    assert_eq!(
+        fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_config_preserves_existing_parent_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let parent = dir.path().join("existing");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = parent.join("config.toml");
+
+    config::write_private_config(&path, "grok_api_key = \"xai-private\"\n").unwrap();
+
+    assert_eq!(
+        fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }

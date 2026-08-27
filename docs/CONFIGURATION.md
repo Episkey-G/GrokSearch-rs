@@ -6,7 +6,7 @@ GrokSearch-rs reads configuration from two sources, merged with the following pr
 2. **Global TOML config file** — `$GROK_SEARCH_CONFIG` if set, otherwise `<home>/.config/grok-search-rs/config.toml` on every platform. `<home>` is `$HOME` on Unix / Git Bash, `%USERPROFILE%` on native Windows shells (PowerShell, cmd).
 3. **Built-in defaults** (lowest).
 
-The config file is optional; missing files are skipped silently. See the [Config file](#config-file) section below for the TOML schema. The AI provider contract is intentionally narrow: configure a Grok/OpenAI-compatible root URL and the server calls `/v1/responses`.
+The config file is optional; missing files are skipped silently. See the [Config file](#config-file) section below for the TOML schema. The upstream AI API is selected independently from the MCP transport: local stdio supports native Grok/xAI **Responses** (`/v1/responses`) and an **OpenAI-compatible Chat Completions** path (`/v1/chat/completions`). The optional remote Streamable HTTP MCP transport deliberately serves the Responses path only.
 
 > **Configuring the remote HTTP transport?** The server stores no credentials — each request supplies its keys as **HTTP headers**, not env. The variable tables in this document use **env-key names**; the header for each is in the mapping table under [Configuration channels](#configuration-channels-stdio-env-vs-remote-headers) directly below.
 
@@ -72,7 +72,7 @@ Local (stdio) — the same values as `env`:
 | `GROK_SEARCH_URL` | `https://api.x.ai` | Root URL, `/v1` base URL, or endpoint-like URL. The service normalizes it to a `/v1` base. |
 | `GROK_SEARCH_MODEL` | `grok-4-1-fast-reasoning` | Model sent in the Responses payload. |
 | `GROK_SEARCH_WEB_SEARCH` | `true` | Sends Responses `{"type":"web_search"}`. |
-| `GROK_SEARCH_X_SEARCH` | `false` | Sends Responses `{"type":"x_search"}` only when enabled. |
+| `GROK_SEARCH_X_SEARCH` | `false` | Sends upstream Responses `{"type":"x_search"}` only when enabled. This does not expose another MCP tool. |
 
 Boolean values accept `1`, `true`, or `yes` as enabled. Any other value is treated as disabled.
 
@@ -112,6 +112,33 @@ GROK_SEARCH_AUTH_MODE = "oauth"
 GROK_SEARCH_MODEL = "grok-4.3"
 GROK_SEARCH_WEB_SEARCH = "true"
 ```
+
+## OpenAI-compatible Chat Completions (stdio only)
+
+Set both the URL and key below while leaving `GROK_SEARCH_API_KEY` unset. The
+service normalizes the URL to a `/v1` base and calls `/v1/chat/completions`.
+This upstream AI transport is available in local stdio mode only; the remote
+Streamable HTTP MCP transport always uses Responses.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENAI_COMPATIBLE_API_URL` | unset | Root URL, `/v1` base URL, or full `/chat/completions` endpoint for the relay. |
+| `OPENAI_COMPATIBLE_API_KEY` | unset | Bearer token for the relay. |
+| `OPENAI_COMPATIBLE_MODEL` | falls back to `GROK_SEARCH_MODEL` | Model sent in the Chat Completions payload. |
+
+`GROK_SEARCH_WEB_SEARCH=true` adds the upstream
+`tools:[{"type":"web_search"}]` hint. Gateways that search automatically may
+ignore it. `GROK_SEARCH_X_SEARCH` is ignored on this path because the upstream
+`x_search` tool is Responses-only.
+
+Upstream selection for local stdio is deterministic:
+
+1. `GROK_SEARCH_AUTH_MODE=oauth` selects Responses with the local OAuth token.
+2. Otherwise, a non-empty `GROK_SEARCH_API_KEY` selects Responses.
+3. Otherwise, non-empty `OPENAI_COMPATIBLE_API_URL` and
+   `OPENAI_COMPATIBLE_API_KEY` select Chat Completions.
+4. Without one of those credential sets, service construction fails with a
+   missing-configuration error.
 
 ## Tavily
 
@@ -163,7 +190,17 @@ content; truncated sources carry a note pointing at `web_fetch(url)` /
 | Variable | Default | Description |
 |---|---|---|
 | `GROK_SEARCH_MAX_INLINE_SOURCES` | `5` | Maximum sources that carry inline `content` per `web_search` response; the rest return metadata only. |
-| `GROK_SEARCH_RESPONSE_MAX_CHARS` | `60000` | Whole-response character budget (answer + per-source metadata and inline content). Over-budget responses truncate inline content tail-first, then drop trailing sources (always keeping at least one) and set `truncated: true`. |
+| `GROK_SEARCH_RESPONSE_MAX_CHARS` | `45000` | Whole-response character budget (answer + per-source metadata and inline content). Over-budget responses truncate inline content tail-first, then drop trailing sources (always keeping at least one) and set `truncated: true`. |
+
+## Search quality shadow
+
+| Variable | Default | Description |
+|---|---|---|
+| `GROK_SEARCH_QUALITY_GATE_SHADOW` | `false` | Emit one aggregate QualityGate JSON event to stderr after each successful `web_search`. Shadow mode does not add requests, retry, change ordering, or modify the MCP response. Raw query, answer, URL, title, content, and domain-filter values are not logged. |
+
+The matching TOML key is `quality_gate_shadow_enabled`. See
+[Search quality safety baseline](SEARCH_QUALITY.md) for the event semantics,
+offline fixture, and the release gate for a future focused retry.
 
 ## Config file
 
@@ -175,7 +212,46 @@ Resolved per platform:
 - **Windows (PowerShell / cmd)**: `%USERPROFILE%\.config\grok-search-rs\config.toml` — e.g. `C:\Users\chen\.config\grok-search-rs\config.toml`.
 - **Windows (Git Bash / MSYS)**: same as Unix — `$HOME/.config/grok-search-rs/config.toml`.
 
-`grok-search-rs --init` picks the right path automatically; no platform-specific shell setup required.
+Both `grok-search-rs setup` and `grok-search-rs --init` pick the right path
+automatically; no platform-specific shell setup is required.
+
+### Guided setup — `setup`
+
+```bash
+grok-search-rs setup
+```
+
+The interactive wizard:
+
+1. Selects native xAI Responses or an OpenAI-compatible Chat Completions gateway.
+2. Reads the required key without echoing it and validates the base URL/model.
+3. Optionally records Tavily, Firecrawl, and GitHub credentials.
+4. Creates the global TOML file with owner-only permissions on Unix.
+5. Prints a key-free Claude Code or Codex registration command and a first-search prompt.
+6. Offers an explicit live connectivity check; declining performs no provider requests.
+
+`setup` requires an interactive terminal and never accepts secrets as command-line
+arguments. It is create-only: if the resolved config file already exists, it
+leaves every byte untouched and tells you to edit it or run `doctor`. Environment
+variables still have higher precedence than values written by the wizard.
+On Windows, filesystem permissions are inherited from the parent directory; use
+the default `%USERPROFILE%` location or an explicitly private directory when
+overriding `GROK_SEARCH_CONFIG`.
+
+Use the standalone diagnostic at any time:
+
+```bash
+grok-search-rs doctor
+grok-search-rs doctor --json
+```
+
+The report distinguishes missing, malformed, and unreadable config from live
+provider failures. Secrets are represented only as `set` / `unset`; `--json`
+uses the same typed report as the human-readable output.
+Configured probes run concurrently, may consume provider quota, and can wait up
+to `GROK_SEARCH_TIMEOUT_SECONDS`. Exit code `0` means the core AI path is usable
+(a report may still be `degraded` when an optional configured provider fails);
+exit code `1` means the core path is `not_ready`.
 
 ### Scaffolding the file — `--init`
 
@@ -211,6 +287,9 @@ Unknown keys are rejected by the loader — typos surface as parse errors instea
 | `fetch_max_chars` | `GROK_SEARCH_FETCH_MAX_CHARS` |
 | `cache_size` | `GROK_SEARCH_CACHE_SIZE` |
 | `timeout_seconds` | `GROK_SEARCH_TIMEOUT_SECONDS` |
+| `openai_compatible_api_url` | `OPENAI_COMPATIBLE_API_URL` |
+| `openai_compatible_api_key` | `OPENAI_COMPATIBLE_API_KEY` |
+| `openai_compatible_model` | `OPENAI_COMPATIBLE_MODEL` |
 | `github_token` | `GITHUB_TOKEN` |
 | `source_max_answers` | `GROK_SEARCH_SOURCE_MAX_ANSWERS` |
 | `source_max_comments` | `GROK_SEARCH_SOURCE_MAX_COMMENTS` |
@@ -218,6 +297,7 @@ Unknown keys are rejected by the loader — typos surface as parse errors instea
 | `enrich_max_chars` | `GROK_SEARCH_ENRICH_MAX_CHARS` |
 | `max_inline_sources` | `GROK_SEARCH_MAX_INLINE_SOURCES` |
 | `response_max_chars` | `GROK_SEARCH_RESPONSE_MAX_CHARS` |
+| `quality_gate_shadow_enabled` | `GROK_SEARCH_QUALITY_GATE_SHADOW` |
 
 Example — minimum useful file:
 

@@ -15,7 +15,7 @@ Use Rust 2021 and keep code formatted with `cargo fmt`.
 
 - Keep MCP tool contracts stable unless the README and tests are updated in the same change.
 - Do not log or commit API keys, bearer tokens, cookies, or raw request headers containing secrets.
-- Keep provider behavior explicit: `anthropic` means `/messages`; `openai` means `/responses`.
+- Keep upstream AI transport behavior explicit: Grok Responses calls `/v1/responses`; OpenAI-compatible Chat Completions calls `/v1/chat/completions`. Do not conflate these upstream transports with the MCP stdio / Streamable HTTP transports.
 - Preserve Tavily's role split: `web_search` uses Tavily for enrichment/fallback, while `web_fetch` and `web_map` are Tavily-owned capabilities.
 - Add or update tests for config parsing, provider payloads, source provenance, and fallback behavior when changing search flow.
 
@@ -25,8 +25,10 @@ Before committing a code change, run:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo test --all-features --locked
+node scripts/check-public-contract.mjs
 ```
 
 For documentation-only changes, at minimum inspect changed Markdown for stale command names and secret-like values.

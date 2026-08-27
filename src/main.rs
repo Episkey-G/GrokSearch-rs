@@ -1,6 +1,6 @@
 use std::io::{IsTerminal, Write};
 
-use grok_search_rs::config::{self, AuthMode, Config, InitOutcome};
+use grok_search_rs::config::{self, Config, InitOutcome};
 
 fn main() -> anyhow::Result<()> {
     build_runtime()?.block_on(async_main())
@@ -25,8 +25,43 @@ fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    // CLI shim: handle --version, --init before MCP server mode.
+    // CLI shim: handle explicit control-plane commands before MCP server mode.
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Subcommands are matched first because each validates its own arguments.
+    // The legacy match-anywhere flags below would otherwise shadow that check,
+    // e.g. `grok-search-rs doctor -v` printing the version instead of the
+    // documented `usage: grok-search-rs doctor [--json]`.
+    if args.first().map(String::as_str) == Some("setup") {
+        if args.len() != 1 {
+            anyhow::bail!("usage: grok-search-rs setup");
+        }
+        let outcome = grok_search_rs::setup::run_interactive()?;
+        if outcome.run_doctor && !run_cli_doctor(false).await? {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if args.first().map(String::as_str) == Some("doctor") {
+        let json = match args.as_slice() {
+            [_] => false,
+            [_, flag] if flag == "--json" => true,
+            _ => anyhow::bail!("usage: grok-search-rs doctor [--json]"),
+        };
+        if !run_cli_doctor(json).await? {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        print_help();
+        return Ok(());
+    }
 
     if args
         .iter()
@@ -68,8 +103,7 @@ async fn async_main() -> anyhow::Result<()> {
             let bind: std::net::SocketAddr = addr
                 .parse()
                 .map_err(|err| anyhow::anyhow!("invalid GROK_MCP_BIND '{addr}': {err}"))?;
-            let base_env: std::collections::HashMap<String, String> =
-                std::env::vars().collect();
+            let base_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             return grok_search_rs::http::run_http(base_env, bind).await;
         }
     }
@@ -79,10 +113,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Detect interactive run with missing credentials and print a friendly
     // onboarding guide instead of a cryptic error. MCP clients always pipe
     // stdio, so a TTY here means the user ran the binary directly.
-    if cfg.grok_auth_mode == AuthMode::ApiKey
-        && cfg.grok_api_key.is_none()
-        && std::io::stdin().is_terminal()
-    {
+    if !cfg.has_ai_credential() && std::io::stdin().is_terminal() {
         print_setup_guide();
         return Ok(());
     }
@@ -90,6 +121,17 @@ async fn async_main() -> anyhow::Result<()> {
     let service = grok_search_rs::service::SearchService::new(cfg)?;
     grok_search_rs::mcp::run_stdio(service).await?;
     Ok(())
+}
+
+async fn run_cli_doctor(json: bool) -> anyhow::Result<bool> {
+    let report = grok_search_rs::diagnostics::diagnose(Config::load_with_diagnostics()).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_text());
+    }
+    std::io::stdout().flush()?;
+    Ok(report.ok)
 }
 
 async fn run_login(cfg: &Config) -> anyhow::Result<()> {
@@ -180,25 +222,22 @@ fn print_setup_guide() {
 should be launched by an MCP client (Claude Code, Codex CLI, Gemini CLI,
 Cursor, VS Code, Windsurf, ...), not run directly.
 
-Required keys
-  GROK_SEARCH_API_KEY   xAI / Grok-compatible key   (https://x.ai/api)
-  TAVILY_API_KEY        Tavily fetch + map          (https://tavily.com)
-  FIRECRAWL_API_KEY     optional fetch fallback     (https://firecrawl.dev)
+Quick setup
+  grok-search-rs setup
+  grok-search-rs doctor
+
+The wizard configures either an xAI Responses key or an OpenAI-compatible
+gateway key without echoing it. Tavily, Firecrawl, and GitHub credentials are
+optional enhancements.
+
+Register the key-free stdio command after setup
+  Claude Code: claude mcp add --scope user grok-search-rs -- grok-search-rs
+  Codex:      codex mcp add grok-search-rs -- grok-search-rs
 
 OAuth alternative
   grok-search-rs login
   Set GROK_SEARCH_AUTH_MODE=oauth in your MCP env or config.
   OAuth mode reuses Hermes' xAI client_id and may carry account / terms risk.
-
-One-line install (Claude Code)
-  claude mcp add-json grok-search-rs --scope user '{
-    "type": "stdio",
-    "command": "grok-search-rs",
-    "env": {
-      "GROK_SEARCH_API_KEY": "xai-...",
-      "TAVILY_API_KEY": "tvly-..."
-    }
-  }'
 
 "#,
     );
@@ -208,9 +247,12 @@ One-line install (Claude Code)
     if let Some(path) = config::config_path() {
         if !path.exists() {
             guide.push_str(&format!(
-                r#"Tip: set keys once for every MCP client
-  grok-search-rs --init                  # scaffold {}
-  $EDITOR {}    # uncomment and fill
+                r#"Resolved global config
+  {}
+
+For a commented template instead of the wizard
+  grok-search-rs --init
+  $EDITOR {}
 
 "#,
                 path.display(),
@@ -227,4 +269,21 @@ Issues:  https://github.com/Episkey-G/GrokSearch-rs/issues
 
     let stdout = std::io::stdout();
     let _ = stdout.lock().write_all(guide.as_bytes());
+}
+
+fn print_help() {
+    println!(
+        r#"grok-search-rs {version}
+
+Usage:
+  grok-search-rs                         Run the stdio MCP server
+  grok-search-rs setup                   Create a guided global configuration
+  grok-search-rs doctor [--json]         Validate config and probe configured providers
+  grok-search-rs --init                  Create a commented config template
+  grok-search-rs login|status|logout     Manage optional xAI OAuth credentials
+  grok-search-rs serve|--http            Run Streamable HTTP (requires the http feature)
+  grok-search-rs --version               Print the version
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    );
 }

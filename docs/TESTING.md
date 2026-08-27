@@ -6,8 +6,10 @@ Run the full local verification suite:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo test --all-features --locked
+node scripts/check-public-contract.mjs
 ```
 
 ## Targeted Tests
@@ -15,8 +17,10 @@ cargo test
 | Area | Command |
 |---|---|
 | Config parsing | `cargo test --test config` |
+| CLI setup and doctor | `cargo test --test cli` |
 | Grok Responses payload and response adapters | `cargo test --test adapter_grok_responses` |
 | Search orchestration | `cargo test --test service_contract` |
+| Offline search-quality baseline | `cargo test --locked --test quality_baseline` |
 | Tavily parsing | `cargo test --test tavily_parse` |
 | Source merge behavior | `cargo test --test source_merge` |
 | Logging | `cargo test --test logging` |
@@ -24,6 +28,14 @@ cargo test
 ## Live Smoke Testing
 
 Live provider tests require real API keys and should not be committed as logs.
+The default test suite and CI never run them. `grok-search-rs doctor` and the
+setup wizard's optional final probe do contact configured providers and may use
+provider quota.
+
+The offline quality baseline uses scripted providers and never contacts the
+network. It validates deterministic orchestration and source-quality contracts;
+it does not claim to measure live-model factual accuracy. See
+[SEARCH_QUALITY.md](SEARCH_QUALITY.md) for its fixed scenarios and limitations.
 
 Recommended smoke matrix:
 

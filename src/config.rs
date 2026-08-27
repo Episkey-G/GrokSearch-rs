@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,6 +15,27 @@ pub enum Transport {
 pub enum AuthMode {
     ApiKey,
     OAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFileState {
+    Unresolved,
+    Missing,
+    Loaded,
+    Malformed,
+    Unreadable,
+}
+
+impl ConfigFileState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unresolved => "unresolved",
+            Self::Missing => "missing",
+            Self::Loaded => "loaded",
+            Self::Malformed => "malformed",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -47,6 +69,15 @@ pub struct Config {
     pub enrich_max_chars: usize,
     pub max_inline_sources: usize,
     pub response_max_chars: usize,
+    pub quality_gate_shadow_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub config_path: Option<PathBuf>,
+    pub file_state: ConfigFileState,
+    pub file_issue: Option<String>,
 }
 
 /// Hand-written `Debug` that masks secret-bearing fields so a stray
@@ -95,6 +126,10 @@ impl std::fmt::Debug for Config {
             .field("enrich_max_chars", &self.enrich_max_chars)
             .field("max_inline_sources", &self.max_inline_sources)
             .field("response_max_chars", &self.response_max_chars)
+            .field(
+                "quality_gate_shadow_enabled",
+                &self.quality_gate_shadow_enabled,
+            )
             .finish()
     }
 }
@@ -132,6 +167,7 @@ struct ConfigFile {
     enrich_max_chars: Option<usize>,
     max_inline_sources: Option<usize>,
     response_max_chars: Option<usize>,
+    quality_gate_shadow_enabled: Option<bool>,
 }
 
 impl ConfigFile {
@@ -214,6 +250,10 @@ impl ConfigFile {
             "GROK_SEARCH_RESPONSE_MAX_CHARS",
             self.response_max_chars.map(|n| n.to_string()),
         );
+        insert(
+            "GROK_SEARCH_QUALITY_GATE_SHADOW",
+            self.quality_gate_shadow_enabled.map(|b| b.to_string()),
+        );
         out
     }
 }
@@ -226,6 +266,42 @@ impl Config {
     /// Missing or unparseable files are skipped silently (env-only mode).
     pub fn load() -> Self {
         Self::load_from(std::env::vars())
+    }
+
+    /// Load configuration while preserving file-resolution diagnostics for CLI
+    /// callers. Unlike [`Config::load`], a malformed file is reported through
+    /// [`LoadedConfig::file_issue`] and never printed to stderr.
+    pub fn load_with_diagnostics() -> LoadedConfig {
+        Self::load_with_diagnostics_from(std::env::vars())
+    }
+
+    /// Test-friendly variant of [`Config::load_with_diagnostics`] with an
+    /// injected environment. Process-style values still override a valid file;
+    /// missing, malformed, and unreadable files fall back to those values plus
+    /// built-in defaults.
+    pub fn load_with_diagnostics_from<I, K, V>(env_vars: I) -> LoadedConfig
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let env_map: HashMap<String, String> = env_vars
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let config_path = resolve_config_path(&env_map);
+        let (file_map, file_state, file_issue) = match config_path.as_deref() {
+            Some(path) => load_file_map_with_diagnostics(path),
+            None => (HashMap::new(), ConfigFileState::Unresolved, None),
+        };
+        let config = Self::from_env_map(merge_env_over_file(file_map, env_map));
+
+        LoadedConfig {
+            config,
+            config_path,
+            file_state,
+            file_issue,
+        }
     }
 
     /// Same as `load`, but uses a caller-supplied env map. Lets tests exercise
@@ -264,7 +340,7 @@ impl Config {
 
         Self {
             grok_api_url: normalize_v1_base(&get(&map, "GROK_SEARCH_URL", "https://api.x.ai")),
-            grok_api_key: map.get("GROK_SEARCH_API_KEY").cloned(),
+            grok_api_key: trimmed_optional(&map, "GROK_SEARCH_API_KEY"),
             grok_auth_mode,
             grok_auth_file: map
                 .get("GROK_SEARCH_AUTH_FILE")
@@ -279,40 +355,32 @@ impl Config {
                 "TAVILY_API_URL",
                 "https://api.tavily.com",
             )),
-            tavily_api_key: map.get("TAVILY_API_KEY").cloned(),
+            tavily_api_key: trimmed_optional(&map, "TAVILY_API_KEY"),
             tavily_enabled: bool_value(&map, "TAVILY_ENABLED", true),
             firecrawl_api_url: normalize_v1_base(&get(
                 &map,
                 "FIRECRAWL_API_URL",
                 "https://api.firecrawl.dev",
             )),
-            firecrawl_api_key: map.get("FIRECRAWL_API_KEY").cloned(),
+            firecrawl_api_key: trimmed_optional(&map, "FIRECRAWL_API_KEY"),
             firecrawl_enabled: bool_value(&map, "FIRECRAWL_ENABLED", true),
             default_extra_sources: usize_value(&map, "GROK_SEARCH_EXTRA_SOURCES", 3),
             fallback_sources: usize_value(&map, "GROK_SEARCH_FALLBACK_SOURCES", 5),
             fetch_max_chars: optional_positive_usize(&map, "GROK_SEARCH_FETCH_MAX_CHARS"),
             cache_size: usize_value(&map, "GROK_SEARCH_CACHE_SIZE", 256),
             timeout: Duration::from_secs(u64_value(&map, "GROK_SEARCH_TIMEOUT_SECONDS", 60)),
-            openai_compatible_api_url: map
-                .get("OPENAI_COMPATIBLE_API_URL")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            openai_compatible_api_key: map
-                .get("OPENAI_COMPATIBLE_API_KEY")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            openai_compatible_model: map
-                .get("OPENAI_COMPATIBLE_MODEL")
-                .cloned()
-                .filter(|v| !v.is_empty()),
+            openai_compatible_api_url: trimmed_optional(&map, "OPENAI_COMPATIBLE_API_URL"),
+            openai_compatible_api_key: trimmed_optional(&map, "OPENAI_COMPATIBLE_API_KEY"),
+            openai_compatible_model: trimmed_optional(&map, "OPENAI_COMPATIBLE_MODEL"),
             transport: decide_transport(&map, grok_auth_mode),
-            github_token: map.get("GITHUB_TOKEN").cloned().filter(|v| !v.is_empty()),
+            github_token: trimmed_optional(&map, "GITHUB_TOKEN"),
             source_max_answers: usize_value(&map, "GROK_SEARCH_SOURCE_MAX_ANSWERS", 5),
             source_max_comments: usize_value(&map, "GROK_SEARCH_SOURCE_MAX_COMMENTS", 30),
             enrich_concurrency: usize_value(&map, "GROK_SEARCH_ENRICH_CONCURRENCY", 3).clamp(1, 5),
             enrich_max_chars: usize_value(&map, "GROK_SEARCH_ENRICH_MAX_CHARS", 15000),
             max_inline_sources: usize_value(&map, "GROK_SEARCH_MAX_INLINE_SOURCES", 5),
             response_max_chars: usize_value(&map, "GROK_SEARCH_RESPONSE_MAX_CHARS", 45_000),
+            quality_gate_shadow_enabled: bool_value(&map, "GROK_SEARCH_QUALITY_GATE_SHADOW", false),
         }
     }
 
@@ -326,9 +394,29 @@ impl Config {
         }
     }
 
+    /// Whether the *selected* upstream AI transport has a usable credential.
+    ///
+    /// Single owner of the "is this installation configured enough to search"
+    /// question, shared by the CLI onboarding guide and `doctor` so the two can
+    /// never disagree about what "configured" means. Reads through
+    /// [`Config::transport`] rather than the raw fields, because the transport
+    /// is what actually decides which credential gets sent.
+    pub fn has_ai_credential(&self) -> bool {
+        if self.grok_auth_mode == AuthMode::OAuth {
+            return true;
+        }
+        match self.transport {
+            Transport::Responses => credential_is_set(&self.grok_api_key),
+            Transport::ChatCompletions => {
+                credential_is_set(&self.openai_compatible_api_url)
+                    && credential_is_set(&self.openai_compatible_api_key)
+            }
+        }
+    }
+
     pub fn redacted_diagnostics(&self) -> String {
         format!(
-            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={}",
+            "grok_api_url={} grok_api_key={} grok_auth_mode={:?} grok_auth_file={} grok_model={} web_search_enabled={} x_search_enabled={} tavily_api_key={} firecrawl_api_key={} default_extra_sources={} fallback_sources={} timeout_seconds={} github_token={} quality_gate_shadow_enabled={}",
             self.grok_api_url,
             redact(self.grok_api_key.as_deref()),
             self.grok_auth_mode,
@@ -344,7 +432,8 @@ impl Config {
             self.default_extra_sources,
             self.fallback_sources,
             self.timeout.as_secs(),
-            self.github_token_status()
+            self.github_token_status(),
+            self.quality_gate_shadow_enabled
         )
     }
 }
@@ -444,6 +533,132 @@ pub fn write_template(path: &Path) -> std::io::Result<InitOutcome> {
     Ok(InitOutcome::Created)
 }
 
+/// Create a credential-bearing config without ever replacing an existing file.
+/// The complete payload is first written to a private temporary file in the
+/// destination directory, then committed with an atomic no-clobber hard link.
+/// Filesystems without hard-link support fall back to a create-new write, which
+/// still never replaces an existing file.
+/// On Unix newly created parent directories use mode 0700 and the file uses
+/// mode 0600; permissions on a pre-existing parent are left unchanged.
+pub fn write_private_config(path: &Path, contents: &str) -> io::Result<InitOutcome> {
+    if path.exists() {
+        return Ok(InitOutcome::AlreadyExists);
+    }
+
+    let parent = private_config_parent(path);
+    create_private_config_dir(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid config file name"))?;
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp.{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let result = (|| {
+        write_private_temp(&temp_path, contents)?;
+        match std::fs::hard_link(&temp_path, path) {
+            Ok(()) => Ok(InitOutcome::Created),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                Ok(InitOutcome::AlreadyExists)
+            }
+            Err(_) => match write_private_temp(path, contents) {
+                Ok(()) => Ok(InitOutcome::Created),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    Ok(InitOutcome::AlreadyExists)
+                }
+                Err(err) => Err(err),
+            },
+        }
+    })();
+
+    if temp_path.exists() {
+        if let Err(cleanup_err) = std::fs::remove_file(&temp_path) {
+            if result.is_ok() {
+                // The config itself was committed, so a bare cleanup error
+                // would tell the caller "nothing happened" while a
+                // credential-bearing temp file survives. Name both paths.
+                return Err(io::Error::new(
+                    cleanup_err.kind(),
+                    format!(
+                        "wrote {} but could not remove the temporary file {}, which still contains the same credentials; delete it manually: {cleanup_err}",
+                        path.display(),
+                        temp_path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    result
+}
+
+fn private_config_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(unix)]
+fn create_private_config_dir(parent: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let already_exists = parent.exists();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    if already_exists {
+        return Ok(());
+    }
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_private_config_dir(parent: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(parent)
+}
+
+#[cfg(unix)]
+fn write_private_temp(path: &Path, contents: &str) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn write_private_temp(path: &Path, contents: &str) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
 /// Embedded TOML template. All keys are commented so an empty scaffold cannot
 /// silently override built-in defaults; the user uncomments only what they need.
 pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
@@ -487,6 +702,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # web_search_enabled = true
 # tavily_enabled     = true
 # firecrawl_enabled  = true
+# quality_gate_shadow_enabled = false # emit aggregate search-quality JSON to stderr; does not retry
 
 # ── Behavior tuning ───────────────────────────────────────────
 # default_extra_sources = 3
@@ -515,6 +731,33 @@ fn load_file_map(path: &Path) -> Option<HashMap<String, String>> {
             );
             None
         }
+    }
+}
+
+fn load_file_map_with_diagnostics(
+    path: &Path,
+) -> (HashMap<String, String>, ConfigFileState, Option<String>) {
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return (HashMap::new(), ConfigFileState::Missing, None);
+        }
+        Err(err) => {
+            return (
+                HashMap::new(),
+                ConfigFileState::Unreadable,
+                Some(err.to_string()),
+            );
+        }
+    };
+
+    match toml::from_str::<ConfigFile>(&body) {
+        Ok(file) => (file.into_env_map(), ConfigFileState::Loaded, None),
+        Err(err) => (
+            HashMap::new(),
+            ConfigFileState::Malformed,
+            Some(err.message().to_string()),
+        ),
     }
 }
 
@@ -570,7 +813,7 @@ fn auth_mode_value(map: &HashMap<String, String>) -> AuthMode {
         Some((_, value)) if value == "oauth" => AuthMode::OAuth,
         Some((raw, _)) => {
             eprintln!(
-                "unknown GROK_SEARCH_AUTH_MODE=\"{}\"; falling back to api_key. Valid values: api_key, oauth.",
+                "unknown GROK_SEARCH_AUTH_MODE={:?}; falling back to api_key. Valid values: api_key, oauth.",
                 raw
             );
             AuthMode::ApiKey
@@ -598,21 +841,35 @@ fn optional_positive_usize(map: &HashMap<String, String>, key: &str) -> Option<u
         .filter(|value| *value > 0)
 }
 
+/// A credential counts as configured only when it holds non-whitespace text.
+/// Shared by [`Config::has_ai_credential`] and the diagnostics summary so a
+/// blank value is never reported as "set" in one place and "unset" in another.
+pub(crate) fn credential_is_set(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|item| !item.trim().is_empty())
+}
+
+fn trimmed_optional(map: &HashMap<String, String>, key: &str) -> Option<String> {
+    map.get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn decide_transport(map: &HashMap<String, String>, auth_mode: AuthMode) -> Transport {
     if auth_mode == AuthMode::OAuth {
         return Transport::Responses;
     }
     let grok_key_set = map
         .get("GROK_SEARCH_API_KEY")
-        .map(|v| !v.is_empty())
+        .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
     let compat_url_set = map
         .get("OPENAI_COMPATIBLE_API_URL")
-        .map(|v| !v.is_empty())
+        .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
     let compat_key_set = map
         .get("OPENAI_COMPATIBLE_API_KEY")
-        .map(|v| !v.is_empty())
+        .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
     if grok_key_set {
@@ -643,6 +900,14 @@ mod source_config_tests {
         let cfg = Config::from_env_map(Vec::<(String, String)>::new());
         assert_eq!(cfg.source_max_answers, 5);
         assert_eq!(cfg.source_max_comments, 30);
+    }
+
+    #[test]
+    fn private_config_accepts_a_bare_relative_file_name() {
+        assert_eq!(
+            private_config_parent(Path::new("config.toml")),
+            Path::new(".")
+        );
     }
 
     #[test]

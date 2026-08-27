@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-07-22",
+  "cases": [
+    {
+      "id": "official_primary_source",
+      "input": {
+        "query": "What does Rust's Result type represent? Use official documentation.",
+        "extra_sources": 1,
+        "include_content": false
+      },
+      "ai_answer": "Rust Result represents success with Ok or failure with Err.",
+      "ai_sources": [
+        {
+          "url": "https://doc.rust-lang.org/std/result/",
+          "provider": "grok_responses",
+          "title": "std::result - Rust"
+        }
+      ],
+      "supplemental_sources": [
+        {
+          "url": "https://blog.rust-lang.org/inside-rust/",
+          "provider": "tavily",
+          "title": "Inside Rust Blog"
+        }
+      ],
+      "expected": {
+        "answer_contains": ["Result", "Ok", "Err"],
+        "required_domain_groups": [
+          { "domains": ["doc.rust-lang.org"], "top_k": 3 }
+        ],
+        "min_unique_hosts": 2,
+        "expected_source_count": 2
+      }
+    },
+    {
+      "id": "fixed_recency_window",
+      "input": {
+        "query": "Find the latest ExampleDB release notes from the last 30 days.",
+        "extra_sources": 1,
+        "recency_days": 30,
+        "include_content": false
+      },
+      "ai_answer": "ExampleDB published a recent maintenance release.",
+      "ai_sources": [
+        {
+          "url": "https://releases.example.org/exampledb/2026-07-18",
+          "provider": "grok_responses",
+          "title": "ExampleDB maintenance release",
+          "published_date": "2026-07-18"
+        }
+      ],
+      "supplemental_sources": [
+        {
+          "url": "https://docs.example.org/exampledb/changelog",
+          "provider": "tavily",
+          "title": "ExampleDB changelog",
+          "published_date": "2026-07-17"
+        }
+      ],
+      "expected": {
+        "answer_contains": ["ExampleDB", "release"],
+        "required_domain_groups": [
+          { "domains": ["releases.example.org"], "top_k": 3 }
+        ],
+        "min_unique_hosts": 2,
+        "expected_source_count": 2,
+        "min_published_date": "2026-06-22"
+      }
+    },
+    {
+      "id": "two_entity_comparison",
+      "input": {
+        "query": "Compare AlphaDB and BetaDB replication and licensing.",
+        "extra_sources": 1,
+        "include_content": false
+      },
+      "ai_answer": "AlphaDB and BetaDB both support replication, while their licensing terms differ.",
+      "ai_sources": [
+        {
+          "url": "https://docs.alpha.example/replication",
+          "provider": "grok_responses",
+          "title": "AlphaDB replication and license"
+        }
+      ],
+      "supplemental_sources": [
+        {
+          "url": "https://docs.beta.example/replication",
+          "provider": "tavily",
+          "title": "BetaDB replication and license"
+        }
+      ],
+      "expected": {
+        "answer_contains": ["AlphaDB", "BetaDB", "replication", "licensing"],
+        "required_domain_groups": [
+          { "domains": ["docs.alpha.example"], "top_k": 4 },
+          { "domains": ["docs.beta.example"], "top_k": 4 }
+        ],
+        "min_unique_hosts": 2,
+        "expected_source_count": 2
+      }
+    },
+    {
+      "id": "chinese_query_preservation",
+      "input": {
+        "query": "用中文说明 Rust 所有权和借用的区别，只参考官方文档。",
+        "extra_sources": 1,
+        "include_domains": ["doc.rust-lang.org"],
+        "include_content": false
+      },
+      "ai_answer": "所有权决定值的生命周期，借用允许在不转移所有权的情况下访问值。",
+      "ai_sources": [
+        {
+          "url": "https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html",
+          "provider": "grok_responses",
+          "title": "理解所有权 - Rust 程序设计语言"
+        }
+      ],
+      "supplemental_sources": [
+        {
+          "url": "https://doc.rust-lang.org/reference/expressions/operator-expr.html",
+          "provider": "tavily",
+          "title": "Borrow expressions - The Rust Reference"
+        }
+      ],
+      "expected": {
+        "answer_contains": ["所有权", "借用"],
+        "required_domain_groups": [
+          { "domains": ["doc.rust-lang.org"], "top_k": 3 }
+        ],
+        "min_unique_hosts": 1,
+        "expected_source_count": 2
+      }
+    },
+    {
+      "id": "exact_duplicate_first_wins",
+      "input": {
+        "query": "Find the canonical Example API reference.",
+        "extra_sources": 2,
+        "include_content": false
+      },
+      "ai_answer": "The Example API reference documents the stable interface.",
+      "ai_sources": [
+        {
+          "url": "https://api.example.com/reference",
+          "provider": "grok_responses",
+          "title": "Primary API Reference"
+        }
+      ],
+      "supplemental_sources": [
+        {
+          "url": "https://api.example.com/reference",
+          "provider": "tavily",
+          "title": "Duplicate API Reference"
+        },
+        {
+          "url": "https://api.example.com/changelog",
+          "provider": "tavily",
+          "title": "API Changelog"
+        }
+      ],
+      "expected": {
+        "answer_contains": ["Example API", "reference"],
+        "required_domain_groups": [
+          { "domains": ["api.example.com"], "top_k": 3 }
+        ],
+        "min_unique_hosts": 1,
+        "expected_source_count": 2,
+        "first_source_provider": "grok_responses",
+        "first_source_title": "Primary API Reference"
+      }
+    }
+  ]
+}
