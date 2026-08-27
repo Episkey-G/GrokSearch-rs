@@ -2217,9 +2217,27 @@ async fn generic_source_fetch(chain: &[SourceEntry], url: &str) -> Result<Fetche
             Err(err) => last_error = Some(err),
         }
     }
-    Err(last_error.unwrap_or(GrokSearchError::MissingConfig(
-        "TAVILY_API_KEY, EXA_API_KEY, TINYFISH_API_KEY or FIRECRAWL_API_KEY",
-    )))
+    Err(last_error.unwrap_or(GrokSearchError::MissingConfig(SOURCE_PROVIDER_KEYS)))
+}
+
+/// The keys that make a generic fetch possible at all. Named from one place so
+/// the `web_fetch` error and the inline-enrichment note cannot drift apart.
+const SOURCE_PROVIDER_KEYS: &str =
+    "TAVILY_API_KEY, EXA_API_KEY, TINYFISH_API_KEY or FIRECRAWL_API_KEY";
+
+/// Why an ordinary URL could not be enriched.
+///
+/// With an empty chain there is no source provider to fetch it, and that has
+/// nothing to do with specialist extractors: those need no key and simply did
+/// not match this URL. Reporting the specialist outcome here sends the reader
+/// off to debug the wrong subsystem — it is how the reporter of issue #39 came
+/// to believe specialists require API keys.
+fn enrichment_failure_reason(chain: &[SourceEntry], specialist_reason: &str) -> String {
+    if chain.is_empty() {
+        format!("no source provider configured (set {SOURCE_PROVIDER_KEYS})")
+    } else {
+        specialist_reason.to_string()
+    }
 }
 
 /// One enrichment outcome: the content to store plus any metadata backfill
@@ -2346,13 +2364,16 @@ async fn enrich_sources(
                         // fetch before giving up, so inline content still has page
                         // evidence when a source provider can fetch the URL (P1 +
                         // specialist-failure fallback). The original `reason` is
-                        // surfaced only if the generic fetch also fails.
+                        // surfaced only if the generic fetch also fails, and only
+                        // when there was a chain to fail — see
+                        // `enrichment_failure_reason`.
                         Ok(Err(reason)) => {
                             let generic = generic_source_fetch(&chain, &url_str);
                             match tokio::time::timeout_at(deadline, generic).await {
                                 Ok(Ok(page)) => EnrichedFetch::from_page(page, max_chars),
                                 Ok(Err(_)) => EnrichedFetch::note(format!(
-                                    "_Failed to retrieve: {reason}_\n\nSource: {url_str}"
+                                    "_Failed to retrieve: {}_\n\nSource: {url_str}",
+                                    enrichment_failure_reason(&chain, &reason)
                                 )),
                                 Err(_elapsed) => EnrichedFetch::note(format!(
                                     "_Failed to retrieve: timeout_\n\nSource: {url_str}"
@@ -3009,6 +3030,85 @@ mod enrich_tests {
                 !c.contains("no_specialist_match"),
                 "must not leak the no_specialist_match note: {c:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_names_the_missing_source_provider_when_the_chain_is_empty() {
+        // With no source provider configured, nothing can fetch an ordinary
+        // page — and that has nothing to do with specialist extractors, which
+        // need no key and simply did not match this URL. Saying
+        // "no_specialist_match" here sends the reader to debug the wrong thing;
+        // it is what taught the reporter of #39 that specialists need keys.
+        let svc = service_with_sources(enrich_config(), SourceRouter::default(), None);
+        let out = svc.web_search(base_input()).await.expect("web_search");
+
+        assert!(!out.sources.is_empty());
+        for s in &out.sources {
+            let c = s.content.as_deref().unwrap_or("");
+            assert!(
+                !c.contains("specialist"),
+                "an empty chain is not a specialist problem: {c:?}"
+            );
+            assert!(
+                c.contains("no source provider configured"),
+                "the note must name what is actually missing: {c:?}"
+            );
+            assert!(
+                c.contains("TAVILY_API_KEY"),
+                "the note must say how to supply one: {c:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_chain_names_the_same_keys_to_web_fetch_and_to_enrichment() {
+        // Two paths, one answer. They drifted apart before because each spelled
+        // the missing config out by hand.
+        let svc = service_with_sources(enrich_config(), SourceRouter::default(), None);
+
+        let fetch_error = svc
+            .web_fetch("https://example.com/plain", None)
+            .await
+            .expect_err("nothing can fetch a generic URL with an empty chain")
+            .to_string();
+        let out = svc.web_search(base_input()).await.expect("web_search");
+        let note = out.sources[0].content.clone().unwrap_or_default();
+
+        for key in [
+            "TAVILY_API_KEY",
+            "EXA_API_KEY",
+            "TINYFISH_API_KEY",
+            "FIRECRAWL_API_KEY",
+        ] {
+            assert!(
+                fetch_error.contains(key),
+                "web_fetch omits {key}: {fetch_error}"
+            );
+            assert!(note.contains(key), "enrichment omits {key}: {note}");
+        }
+    }
+
+    #[tokio::test]
+    async fn specialist_extractors_still_work_without_any_source_provider() {
+        // The whole point of the distinction: specialists take no key, so an
+        // empty chain must not stop them.
+        let router = SourceRouter::with_extractors(vec![Box::new(CountingExtractor {
+            peak: Arc::new(AtomicUsize::new(0)),
+            current: Arc::new(AtomicUsize::new(0)),
+            sleep_ms: 0,
+        })]);
+        let svc = service_with_sources(enrich_config(), router, None);
+        let out = svc.web_search(base_input()).await.expect("web_search");
+
+        assert!(!out.sources.is_empty());
+        for s in &out.sources {
+            let c = s.content.as_deref().unwrap_or("");
+            assert!(
+                !c.contains("Failed to retrieve"),
+                "a specialist needs no source provider: {c:?}"
+            );
+            assert!(!c.is_empty(), "specialist content must land: {c:?}");
         }
     }
 
