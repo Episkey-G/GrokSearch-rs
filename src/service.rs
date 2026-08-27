@@ -1314,6 +1314,19 @@ impl SearchService {
                 "detail": firecrawl_probe.detail,
             },
             "source_chain": source_chain,
+            // Whether the config file was read at all, and why not when it was
+            // not. Without this a rejected file is indistinguishable from an
+            // absent one: both leave every setting at its default, and the
+            // only account of the difference went to stderr, which an MCP
+            // client swallows.
+            "config_file": {
+                "path": self.config
+                    .config_file_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "state": self.config.config_file_state.as_str(),
+                "detail": self.config.config_file_state.detail(),
+            },
             "default_extra_sources": self.config.default_extra_sources,
             "fallback_sources": self.config.fallback_sources,
             "cache_size": self.config.cache_size,
@@ -2765,6 +2778,81 @@ mod transport_dispatch_tests {
         };
         let report_unset = svc_unset.doctor().await;
         assert_eq!(report_unset["github_token"], "unset");
+    }
+
+    /// Build a service around a config whose file outcome the test dictates.
+    fn service_for_config(config: Config) -> SearchService {
+        SearchService {
+            default_model: resolve_default_model(&config),
+            config,
+            ai: Arc::new(FakeAiProvider),
+            source_slots: Arc::new(Vec::new()),
+            cache: Arc::new(Mutex::new(SourceCache::new(16))),
+            http_client: crate::providers::http::build_client(std::time::Duration::from_secs(30)),
+            source_router: Arc::new(crate::sources::SourceRouter::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_a_rejected_config_file_and_why() {
+        // The whole point: a typo used to void the entire file with nothing to
+        // show for it but a stderr line the client swallowed, leaving the
+        // operator to conclude their key "wasn't configured" (issue #35).
+        let mut config = Config::from_env_map([("GROK_SEARCH_API_KEY", "xai-fake")]);
+        config.config_file_path = Some(std::path::PathBuf::from("/tmp/does-not-matter.toml"));
+        config.config_file_state =
+            crate::config::ConfigFileState::Rejected("unknown field `tavly_api_key`".to_string());
+
+        let report = service_for_config(config).doctor().await;
+
+        assert_eq!(report["config_file"]["state"], "rejected");
+        assert_eq!(
+            report["config_file"]["path"], "/tmp/does-not-matter.toml",
+            "the operator needs to know which file: {report}"
+        );
+        assert!(
+            report["config_file"]["detail"]
+                .as_str()
+                .expect("a rejection carries its reason")
+                .contains("tavly_api_key"),
+            "the reason must name the offending key: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_distinguishes_an_absent_config_file_from_a_rejected_one() {
+        // Running on environment variables alone is normal, not a failure.
+        let report =
+            service_for_config(Config::from_env_map([("GROK_SEARCH_API_KEY", "xai-fake")]))
+                .doctor()
+                .await;
+
+        assert_eq!(report["config_file"]["state"], "absent");
+        assert!(
+            report["config_file"]["detail"].is_null(),
+            "nothing failed, so there is no reason to give: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_the_endpoints_that_will_actually_be_called() {
+        // A report that echoes config the providers do not use would send the
+        // operator to debug a URL nothing ever contacts.
+        let config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "xai-fake"),
+            ("GROK_SEARCH_URL", "https://gateway.example"),
+            ("EXA_API_URL", "https://exa.example"),
+            ("TAVILY_API_URL", "https://tavily.example"),
+        ]);
+        let expected_grok = config.grok_api_url.clone();
+        let expected_exa = config.exa_api_url.clone();
+        let expected_tavily = config.tavily_api_url.clone();
+
+        let report = service_for_config(config).doctor().await;
+
+        assert_eq!(report["grok"]["api_url"], expected_grok);
+        assert_eq!(report["exa"]["api_url"], expected_exa);
+        assert_eq!(report["tavily"]["api_url"], expected_tavily);
     }
 
     #[tokio::test]

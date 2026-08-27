@@ -1,6 +1,6 @@
 use std::fs;
 
-use grok_search_rs::config::{self, AuthMode, Config, InitOutcome, Transport};
+use grok_search_rs::config::{self, AuthMode, Config, ConfigFileState, InitOutcome, Transport};
 use tempfile::tempdir;
 
 #[test]
@@ -537,4 +537,55 @@ fn redacted_diagnostics_masks_tinyfish_and_exa_keys() {
     );
     assert!(diagnostics.contains("tinyfish_api_key="));
     assert!(diagnostics.contains("exa_api_key="));
+}
+
+#[test]
+fn a_rejected_config_file_is_recorded_with_its_reason() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "grok_api_key = \"xai-typo\"\nnot_a_real_key = 1\n").unwrap();
+
+    let cfg = Config::load_from([("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string())]);
+
+    // Strictness is deliberate and unchanged: one unknown key voids the whole
+    // file rather than half-applying it. What changes is that the rejection is
+    // now recorded instead of living only on a stderr line nobody sees.
+    assert_eq!(
+        cfg.grok_api_key, None,
+        "a rejected file must not partially apply"
+    );
+    assert_eq!(cfg.config_file_path.as_deref(), Some(path.as_path()));
+    match &cfg.config_file_state {
+        ConfigFileState::Rejected(detail) => {
+            assert!(detail.contains("not_a_real_key"), "{detail}")
+        }
+        other => panic!("expected a rejected file, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_absent_config_file_is_not_reported_as_a_failure() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("nothing-here.toml");
+
+    let cfg = Config::load_from([("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string())]);
+
+    assert_eq!(cfg.config_file_state, ConfigFileState::Absent);
+    assert_eq!(
+        cfg.config_file_path.as_deref(),
+        Some(path.as_path()),
+        "the resolved path is worth reporting even when nothing is there"
+    );
+}
+
+#[test]
+fn a_good_config_file_is_recorded_as_loaded() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "grok_api_key = \"xai-good\"\n").unwrap();
+
+    let cfg = Config::load_from([("GROK_SEARCH_CONFIG", path.to_string_lossy().to_string())]);
+
+    assert_eq!(cfg.config_file_state, ConfigFileState::Loaded);
+    assert_eq!(cfg.grok_api_key.as_deref(), Some("xai-good"));
 }
