@@ -147,7 +147,7 @@ python3 ./.trellis/scripts/get_context.py --mode phase --step <X.Y>  # detailed 
 ## Phase Index
 
 ```
-Phase 1: Plan    → classify, get task-creation consent, then grill → to-spec → to-tickets
+Phase 1: Plan    → classify, get task-creation consent, then grill → to-spec → to-tickets (user-invoked)
 Phase 2: Execute → implement via tdd only after status is in_progress, then code-review
 Phase 3: Finish  → diagnose, update spec + domain docs, commit, and wrap up
 ```
@@ -184,7 +184,7 @@ Complex task: ask the user if you can create a Trellis task and enter the planni
 
 ### Phase 1: Plan
 - 1.0 Create task `[required · once]` (only after task-creation consent)
-- 1.1 Requirement exploration `[required · repeatable]` — `grill-with-docs` → `to-spec` → `to-tickets` (`prd.md`; complex tasks also need `design.md` + `implement.md`)
+- 1.1 Requirement exploration `[required · repeatable]` — `grill-with-docs` → `to-spec` → `to-tickets`, all three **user-invoked** (`prd.md`; complex tasks also need `design.md` + `implement.md`)
 - 1.2 Research `[optional · repeatable]`
 - 1.3 Configure context `[required · once]` — Claude Code, Cursor, OpenCode, Codex, Kiro, Gemini, Qoder, CodeBuddy, Copilot, Droid, Pi, Oh My Pi, ZCode, Snow, Reasonix, Grok, Kimi Code (sub-agent-dispatch platforms only; inline platforms skip)
 - 1.4 Activate task `[required · once]` (review gate, then `task.py start`; status → in_progress)
@@ -193,9 +193,10 @@ Complex task: ask the user if you can create a Trellis task and enter the planni
 <!-- Per-turn breadcrumb: shown throughout Phase 1 (status='planning') -->
 
 [workflow-state:planning]
-Stay in planning. `grill-with-docs` -> `to-spec` (writes `prd.md`, no second interview) -> `to-tickets` only if multi-deliverable. Keep all three in ONE context window.
-Lightweight: `prd.md` alone. Complex: + `design.md` + `implement.md`, reviewed before `task.py start`.
-Curate `implement.jsonl` / `check.jsonl` before start.
+Ask the user to run `/grill-with-docs`, then `/to-spec`; stay in planning. Do not improvise the interview or write `prd.md` yourself.
+Lightweight: `prd.md` can be enough. Complex: finish `prd.md`, `design.md`, and `implement.md`; ask for review before `task.py start`.
+Multi-deliverable scope: consider a parent task plus independently verifiable child tasks; dependencies must be written in child artifacts, not implied by tree position.
+Sub-agent mode: curate `implement.jsonl` and `check.jsonl` as spec/research manifests before start.
 [/workflow-state:planning]
 
 <!-- Per-turn breadcrumb: shown throughout Phase 1 when codex.dispatch_mode=inline.
@@ -205,10 +206,9 @@ Curate `implement.jsonl` / `check.jsonl` before start.
      into a sub-agent. -->
 
 [workflow-state:planning-inline]
-Load `grill-with-docs` and interview until every branch of the design tree is resolved; stay in planning.
-Then load `to-spec` to synthesize the thread into `prd.md` — synthesis only, do NOT interview a second time.
+Ask the user to run `/grill-with-docs`, then `/to-spec`; stay in planning. Do not improvise the interview or write `prd.md` yourself.
 Lightweight: `prd.md` can be enough. Complex: finish `prd.md`, `design.md`, and `implement.md`; ask for review before `task.py start`.
-Multi-deliverable scope: load `to-tickets` and split into tracer-bullet child tasks; each child's blocking edges go in its own `prd.md`, never implied by tree position.
+Multi-deliverable scope: consider a parent task plus independently verifiable child tasks; dependencies must be written in child artifacts, not implied by tree position.
 Inline mode: skip jsonl curation; Phase 2 reads artifacts/specs via `trellis-before-dev`.
 [/workflow-state:planning-inline]
 
@@ -277,7 +277,7 @@ When a user request matches one of these intents inside an active task, route fi
 
 [Claude Code, Cursor, OpenCode, codex-sub-agent, Kiro, Gemini, Qoder, CodeBuddy, Copilot, Droid, Pi, Oh My Pi, ZCode, Snow, Reasonix, Trae, Grok, Kimi Code]
 
-- Planning or unclear requirements -> `grill-with-docs`; ready to write it down -> `to-spec`; multi-deliverable -> `to-tickets`.
+- Planning or unclear requirements -> ask the user to type `/grill-with-docs`; ready to write it down -> ask for `/to-spec`; multi-deliverable -> ask for `/to-tickets`. All three are user-invoked; you route by naming the command, not by loading it.
 - `in_progress` implementation -> dispatch `trellis-implement` (it drives `tdd`); verification -> dispatch `trellis-check` twice in parallel (`Axis: standards`, `Axis: spec`); research -> dispatch `trellis-research` (it drives `research`).
 - Something broken or a hard bug -> `diagnosing-bugs`. Terminology or a hard-to-reverse decision -> `domain-modeling`. Module shape / seams -> `codebase-design`. Spec updates -> `trellis-update-spec`.
 
@@ -285,7 +285,7 @@ When a user request matches one of these intents inside an active task, route fi
 
 [codex-inline, Kilo, Antigravity, Devin]
 
-- Planning or unclear requirements -> `grill-with-docs`; ready to write it down -> `to-spec`; multi-deliverable -> `to-tickets`.
+- Planning or unclear requirements -> ask the user to type `/grill-with-docs`; ready to write it down -> ask for `/to-spec`; multi-deliverable -> ask for `/to-tickets`. All three are user-invoked; you route by naming the command, not by loading it.
 - Before editing -> `trellis-before-dev`; building behaviour -> `tdd`; after editing -> `code-review`.
 - Something broken or a hard bug -> `diagnosing-bugs`. Terminology or a hard-to-reverse decision -> `domain-modeling`. Module shape / seams -> `codebase-design`. Spec updates -> `trellis-update-spec`.
 
@@ -334,7 +334,9 @@ Skip when `python3 ./.trellis/scripts/task.py current --source` already points t
 
 This step has three stages. Run them in order, in **one unbroken context window** — the spec wants the grilling verbatim as a primary source, not a summary of it. If the window approaches its limit before the split is done, compact at a stage boundary rather than pushing on degraded.
 
-**Stage 1 — Grill.** Load the `grill-with-docs` skill and interview the user until every branch of the design tree is resolved. It runs the `grilling` primitive together with `domain-modeling`, so the interview also sharpens `CONTEXT.md` and records hard-to-reverse decisions as ADRs under `docs/adr/`.
+**All three stages are user-invoked.** `grill-with-docs`, `to-spec`, and `to-tickets` carry `disable-model-invocation: true` upstream, so their descriptions never enter your context and you cannot load them. At each stage boundary, name the command the user should type and wait for it. Announcing the next command is the deliverable of that turn — do not fill the gap by improvising the stage yourself.
+
+**Stage 1 — Grill.** Ask the user to type `/grill-with-docs`, then let the interview run until every branch of the design tree is resolved. The skill delegates to the `grilling` primitive together with `domain-modeling` — both of which you *can* invoke — so once it starts, the interview proceeds normally, sharpens `CONTEXT.md`, and records hard-to-reverse decisions as ADRs under `docs/adr/`.
 
 The rules that make the interview work:
 - Facts are your job, decisions are the user's — research before asking
@@ -343,16 +345,16 @@ The rules that make the interview work:
 
 If a question needs a *runnable* answer — a state model, a piece of business logic, a UI you have to see — detour through the `prototype` skill and bring the finding back before continuing.
 
-**Stage 2 — Spec.** Load the `to-spec` skill to synthesize the thread into the task's `prd.md`. **Do not interview again** — `to-spec` is pure synthesis of what stage 1 already settled. Before writing, sketch the seams you'll test the feature at, prefer existing seams to new ones, use the highest seam possible, and check those seams with the user.
+**Stage 2 — Spec.** When the interview has settled, ask the user to type `/to-spec`; it synthesizes the thread into the task's `prd.md`. Do not write `prd.md` yourself while waiting. **Do not interview again** — `to-spec` is pure synthesis of what stage 1 already settled. Before writing, sketch the seams you'll test the feature at, prefer existing seams to new ones, use the highest seam possible, and check those seams with the user.
 
-Write into the Trellis task artifacts, not into a tracker (see `docs/agents/issue-tracker.md`):
+The stage writes the active task's artifacts:
 - `prd.md` — problem statement, solution, an extensive numbered list of user stories, implementation decisions, testing decisions, out of scope
 - `design.md` (complex tasks) — technical design
 - `implement.md` (complex tasks) — ordered execution checklist, validation commands, rollback points
 
 Keep `prd.md` free of file paths and code snippets; they go stale. The exception is a snippet a prototype produced that encodes a decision more precisely than prose can.
 
-**Stage 3 — Split (only when the scope has several independently verifiable deliverables).** Load the `to-tickets` skill and break the spec into **tracer-bullet vertical slices**: each cuts a narrow but complete path through every layer, is demoable on its own, and fits in a single fresh context window. Prefactoring goes first — make the change easy, then make the easy change. Wide mechanical refactors are the exception: sequence them expand → migrate in batches → contract instead of forcing a vertical slice.
+**Stage 3 — Split (only when the scope has several independently verifiable deliverables).** Ask the user to type `/to-tickets`; it breaks the spec into **tracer-bullet vertical slices**: each cuts a narrow but complete path through every layer, is demoable on its own, and fits in a single fresh context window. Prefactoring goes first — make the change easy, then make the easy change. Wide mechanical refactors are the exception: sequence them expand → migrate in batches → contract instead of forcing a vertical slice.
 
 Present the breakdown, iterate with the user until approved, then create one child task per slice with `task.py create "<title>" --slug <name> --parent <parent-dir>` and write each child's blocking edges into its own `prd.md`.
 
