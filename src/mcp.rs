@@ -2,12 +2,27 @@ use crate::error::{GrokSearchError, Result};
 use crate::model::tool::WebSearchInput;
 use crate::service::SearchService;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+/// Bind the request loop to the process's stdin/stdout. Binding is all this
+/// does; every decision about what a message means lives in [`serve`].
 pub async fn run_stdio(service: SearchService) -> anyhow::Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let mut lines = BufReader::new(stdin).lines();
+    serve(service, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// The stdio transport's request loop, taking its transport as parameters so
+/// it can be driven over in-memory buffers: one JSON-RPC message per input
+/// line, one response line per message that carries an `id`.
+pub(crate) async fn serve<R, W>(
+    service: SearchService,
+    reader: R,
+    mut writer: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
 
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -17,15 +32,15 @@ pub async fn run_stdio(service: SearchService) -> anyhow::Result<()> {
             Ok(value) => value,
             Err(err) => {
                 let response = error_response(Value::Null, -32700, format!("parse error: {err}"));
-                stdout.write_all(response.to_string().as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
+                writer.write_all(response.to_string().as_bytes()).await?;
+                writer.write_all(b"\n").await?;
                 continue;
             }
         };
 
         if let Some(response) = handle_message(&service, request).await {
-            stdout.write_all(response.to_string().as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
+            writer.write_all(response.to_string().as_bytes()).await?;
+            writer.write_all(b"\n").await?;
         }
     }
 
@@ -577,5 +592,105 @@ mod tests {
             props.contains_key("response_format"),
             "response_format must remain: {props:?}"
         );
+    }
+
+    /// Drive the serve loop over in-memory buffers instead of process stdio,
+    /// returning one parsed value per response line. Every characterization
+    /// test below observes the loop only through what a client would see:
+    /// bytes in, response lines out.
+    async fn drive(input: &str) -> Vec<Value> {
+        let service = SearchService::fake_with_sources();
+        let mut output: Vec<u8> = Vec::new();
+        serve(service, input.as_bytes(), &mut output)
+            .await
+            .expect("serve loop ran to end of input");
+        String::from_utf8(output)
+            .expect("responses are utf-8")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each response line is json"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn serve_negotiates_protocol_version_over_in_memory_io() {
+        let responses = drive(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
+"#,
+        )
+        .await;
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "one request, one response: {responses:?}"
+        );
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    #[tokio::test]
+    async fn serve_declares_latest_protocol_version_for_an_unknown_request() {
+        let responses = drive(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01","capabilities":{}}}
+"#,
+        )
+        .await;
+
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"],
+            LATEST_PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_emits_no_response_for_a_notification() {
+        let responses = drive(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+"#,
+        )
+        .await;
+
+        assert!(
+            responses.is_empty(),
+            "a message without an id is a notification: {responses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_reports_a_parse_error_and_keeps_serving() {
+        // The second line proves the loop survives the first: a client that
+        // sends one bad frame must not lose the rest of its session.
+        let responses = drive(
+            r#"not json at all
+{"jsonrpc":"2.0","id":7,"method":"ping"}
+"#,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert_eq!(responses[1]["id"], 7);
+        assert_eq!(responses[1]["result"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn serve_skips_blank_lines() {
+        let responses = drive(
+            r#"
+{"jsonrpc":"2.0","id":7,"method":"ping"}
+
+
+"#,
+        )
+        .await;
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "blank lines are framing, not messages: {responses:?}"
+        );
+        assert_eq!(responses[0]["id"], 7);
     }
 }
