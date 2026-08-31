@@ -162,6 +162,8 @@ Supplemental sources and generic (non-specialist) fetch walk an ordered provider
 
 `web_map` is a separate capability, not part of this chain: it always uses Tavily whenever `TAVILY_API_KEY` is configured, even when the chain excludes Tavily.
 
+**The chain and the specialist extractors are different things.** A *source provider* (Tavily, Exa, TinyFish, Firecrawl) is an external service gated behind an API key. A *specialist extractor* (GitHub, StackExchange, arXiv, Wikipedia) is a key-free parser for one family of URLs; it is never configured and never part of the chain. So with **no source provider configured at all**, `web_fetch` still handles those four families, and fails on every ordinary URL — there is nothing left that can retrieve one. Inline enrichment in `web_search` behaves the same way and says so by name.
+
 | Variable | Default | Description |
 |---|---|---|
 | `GROK_SEARCH_SOURCE_PROVIDERS` | unset | Comma-separated explicit chain order, e.g. `tinyfish,tavily,firecrawl` (valid names: `tavily`, `exa`, `tinyfish`, `firecrawl`). Unset = configured providers in canonical order `tavily, exa, tinyfish, firecrawl`. Unknown names fail at startup. |
@@ -211,6 +213,8 @@ Resolved per platform:
 - **Windows (Git Bash / MSYS)**: same as Unix — `$HOME/.config/grok-search-rs/config.toml`.
 
 `grok-search-rs --init` picks the right path automatically; no platform-specific shell setup required.
+
+**Parsing is strict: one unknown key voids the whole file**, so a typo surfaces as an error rather than silently applying half your settings. Because MCP clients swallow stderr, the `doctor` tool reports what became of the file — its resolved path plus `absent`, `loaded`, or `rejected` with the reason attached. If your settings all look like defaults, check that field first.
 
 ### Scaffolding the file — `--init`
 

@@ -12,13 +12,14 @@
 
 - 🔎 **Live web search** with cited sources, cached for follow‑up `get_sources` calls. Opt‑in `include_content` enriches the top sources with full extracted text in one call.
 - 📏 **Response budgeting** — `web_search` keeps responses inside agent context limits: only the top `max_inline_sources` carry inline text, a whole‑response char budget (`response_max_chars`, default 45k — sized to stay under the MCP client token ceiling after JSON serialization) trims tail sources with recovery notes, `response_format: "concise" | "detailed"` picks the payload size, and `get_sources` pages through cached sources with `offset`/`limit`. The session cache always keeps full content.
-- 🧩 **Structured `web_fetch`** — GitHub issues/PRs/releases, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, release notes, accepted‑answer ordering, abstracts, vote‑sorted answers). Anything else falls back to the generic source chain (Tavily → Exa → TinyFish → Firecrawl, as configured). Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
+- 🧩 **Structured `web_fetch`** — GitHub issues/PRs/releases, StackExchange/MathOverflow, arXiv, and Wikipedia URLs are parsed by specialist extractors into clean Markdown (title, state/labels, release notes, accepted‑answer ordering, abstracts, vote‑sorted answers). **Specialist extractors need no API key.** Anything else falls back to the generic source chain (Tavily → Exa → TinyFish → Firecrawl, as configured) — so with **no source provider configured, ordinary URLs cannot be fetched at all**, only the specialist families above. Output carries `source_type` and a `fallback_reason` when a specialist was skipped.
 - 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
 - 🔐 **Optional Grok OAuth mode** — `login/status/logout` commands store a local xAI OAuth token for Responses auth, so the MCP server can run without `GROK_SEARCH_API_KEY`.
 - 🌐 **Optional remote mode** — build with `--features http` to serve the same tools over **Streamable HTTP** (multi‑tenant, bring‑your‑own‑key via request headers) for mobile / multi‑device access. See [self-hosting](#self-hosting-remote-http).
 - 📥 **Pluggable source chain** — supplemental sources and generic fetch walk an ordered provider chain: **Tavily** (RAG‑tuned search + extract + map), **Exa** (semantic search, native domain/date filters), **TinyFish** (free search + JS‑rendering fetch), **Firecrawl** (robust scrape fallback). First provider with results wins; `GROK_SEARCH_SOURCE_PROVIDERS` reorders. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
 - 🐦 **Optional X/Twitter search** via `x_search` (Responses transport only).
-- 🩺 **`doctor`** — connectivity probe + redacted config in one tool call.
+- 🚦 **Concurrent stdio requests** — up to 8 tool calls are handled at once; anything beyond that queues rather than being refused. Responses come back in completion order, paired to requests by JSON‑RPC `id`.
+- 🩺 **`doctor`** — connectivity probe + redacted config in one tool call, including whether your config file was found, loaded, or rejected (and why).
 - 🗂 **Single global config file** so multiple MCP clients share one set of keys.
 
 ---
@@ -237,9 +238,9 @@ Tired of duplicating `env` blocks across clients? Run `grok-search-rs --init` on
 |---|---|
 | `web_search` | Sourced summary for a topic. Sources cached for follow‑up. `response_format: "concise"` returns answer + metadata only; `"detailed"` inlines source text within the response budget. |
 | `get_sources` | Re‑fetch sources of a previous `web_search` by `session_id`. Supports `offset` / `limit` pagination for large source sets. |
-| `web_fetch` | Page content as clean Markdown. Specialist extractors for GitHub / StackExchange / arXiv / Wikipedia; generic Tavily → Firecrawl fallback otherwise. Returns `source_type` + `fallback_reason`. |
+| `web_fetch` | Page content as clean Markdown. Key‑free specialist extractors for GitHub / StackExchange / arXiv / Wikipedia; every other URL goes through the source chain, which needs at least one provider key. Returns `source_type` + `fallback_reason`. |
 | `web_map` | Discover URLs on a domain via Tavily Map. |
-| `doctor` | Live connectivity probe + redacted config. Run first when something looks off. |
+| `doctor` | Live connectivity probe + redacted config, plus the config file's path and whether it was `absent` / `loaded` / `rejected`. Run first when something looks off. |
 
 ---
 
