@@ -130,8 +130,19 @@ GROK_SEARCH_WEB_SEARCH = "true"
 | Variable | Default | Description |
 |---|---|---|
 | `FIRECRAWL_API_KEY` | unset | Enables Firecrawl fallback for `web_fetch` and supplemental fallback sources. |
-| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl API base URL, normalized to `/v1`. |
+| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl API base URL. Defaults to `/v2`; explicit `/v1` or `/v2` is preserved. |
 | `FIRECRAWL_ENABLED` | `true` | Optional override. Set to `false` to disable Firecrawl even if a key is configured. |
+
+Firecrawl uses [`POST /v2/search`](https://docs.firecrawl.dev/api-reference/endpoint/search)
+and `POST /v2/scrape` by default. Search consumes web results from the v2
+`data.web` response; legacy `data` arrays and flat `results` arrays are also accepted.
+The search request uses Firecrawl's default web source.
+
+For a gateway mounted at `http://localhost:9010/firecrawl`, set
+`FIRECRAWL_API_URL=http://localhost:9010/firecrawl` or
+`http://localhost:9010/firecrawl/v2`. Both send requests to
+`/firecrawl/v2/search` and `/firecrawl/v2/scrape`, preserving the gateway prefix.
+For a legacy v1 deployment, explicitly set a base ending in `/v1`.
 
 ## TinyFish
 

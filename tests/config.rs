@@ -117,6 +117,45 @@ fn config_reads_firecrawl_settings() {
 }
 
 #[test]
+fn config_defaults_firecrawl_to_v2_and_preserves_explicit_versions() {
+    let defaults = Config::from_env_map(std::iter::empty::<(&str, &str)>());
+    assert_eq!(defaults.firecrawl_api_url, "https://api.firecrawl.dev/v2");
+
+    let cases = [
+        ("https://firecrawl.example", "https://firecrawl.example/v2"),
+        (
+            " https://firecrawl.example/ ",
+            "https://firecrawl.example/v2",
+        ),
+        (
+            "https://firecrawl.example/v1/",
+            "https://firecrawl.example/v1",
+        ),
+        (
+            "https://firecrawl.example/v2/",
+            "https://firecrawl.example/v2",
+        ),
+        (
+            "http://localhost:9010/firecrawl",
+            "http://localhost:9010/firecrawl/v2",
+        ),
+        (
+            "http://localhost:9010/gateway/firecrawl/v2/",
+            "http://localhost:9010/gateway/firecrawl/v2",
+        ),
+        (
+            "http://localhost:9010/gateway/firecrawl/v1/",
+            "http://localhost:9010/gateway/firecrawl/v1",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let cfg = Config::from_env_map([("FIRECRAWL_API_URL", input)]);
+        assert_eq!(cfg.firecrawl_api_url, expected, "input: {input}");
+    }
+}
+
+#[test]
 fn config_redacts_grok_tavily_and_firecrawl_keys() {
     let cfg = Config::from_env_map([
         ("GROK_SEARCH_API_KEY", "grok-1234567890"),
@@ -284,7 +323,7 @@ timeout_seconds       = 30
     assert_eq!(cfg.tavily_api_url, "https://tavily.example");
     assert_eq!(cfg.tavily_api_key.as_deref(), Some("tvly-full"));
     assert!(!cfg.tavily_enabled);
-    assert_eq!(cfg.firecrawl_api_url, "https://firecrawl.example/v1");
+    assert_eq!(cfg.firecrawl_api_url, "https://firecrawl.example/v2");
     assert_eq!(cfg.firecrawl_api_key.as_deref(), Some("fc-full"));
     assert!(!cfg.firecrawl_enabled);
     assert_eq!(cfg.default_extra_sources, 4);

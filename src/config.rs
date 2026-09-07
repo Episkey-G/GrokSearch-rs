@@ -378,7 +378,7 @@ impl Config {
                 .cloned()
                 .filter(|value| !value.trim().is_empty()),
             tavily_enabled: bool_value(&map, "TAVILY_ENABLED", true),
-            firecrawl_api_url: normalize_v1_base(&get(
+            firecrawl_api_url: normalize_firecrawl_base(&get(
                 &map,
                 "FIRECRAWL_API_URL",
                 "https://api.firecrawl.dev",
@@ -702,6 +702,16 @@ pub fn normalize_v1_base(url: &str) -> String {
 
 fn normalize_plain_base(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+fn normalize_firecrawl_base(url: &str) -> String {
+    let mut value = normalize_plain_base(url);
+    // Default to v2 while allowing legacy deployments to explicitly use v1.
+    // Append after any gateway path prefix without duplicating the version.
+    if !value.ends_with("/v1") && !value.ends_with("/v2") {
+        value.push_str("/v2");
+    }
+    value
 }
 
 fn bool_value(map: &HashMap<String, String>, key: &str, default: bool) -> bool {

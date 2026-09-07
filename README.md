@@ -187,7 +187,7 @@ Notes:
 | `GROK_SEARCH_EXTRA_SOURCES` | `3` | Extra chain‑served sources after a Grok answer (`0` disables). |
 | `GROK_SEARCH_FALLBACK_SOURCES` | `5` | Fallback source count when the AI step can't verify itself. |
 | `FIRECRAWL_API_KEY` | unset | Enables Firecrawl as `web_fetch` / source fallback. |
-| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base. |
+| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Firecrawl base; defaults to `/v2`, preserving explicit `/v1` or `/v2` and gateway prefixes. |
 | `TINYFISH_API_KEY` | unset | Enables TinyFish (free search + JS‑rendering fetch) in the chain. |
 | `EXA_API_KEY` | unset | Enables Exa (semantic search, native filters) in the chain. |
 | `GROK_SEARCH_SOURCE_PROVIDERS` | unset | Explicit chain order, e.g. `tinyfish,tavily,firecrawl`. Unset = canonical order `tavily, exa, tinyfish, firecrawl` over configured providers. |

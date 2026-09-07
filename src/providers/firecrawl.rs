@@ -94,7 +94,10 @@ pub fn parse_firecrawl_scrape(raw: &Value) -> Result<FetchedPage> {
 }
 
 pub fn normalize_firecrawl_results(raw: &Value) -> Vec<Source> {
-    raw.get("data")
+    // v2 groups search results by source type; this provider consumes web
+    // results only. Keep accepting v1's data array and flat gateway results.
+    raw.pointer("/data/web")
+        .or_else(|| raw.get("data"))
         .or_else(|| raw.get("results"))
         .and_then(Value::as_array)
         .into_iter()
