@@ -8,6 +8,24 @@ pub fn dedupe_sources(sources: &mut Vec<Source>) {
     sources.retain(|source| !source.url.trim().is_empty() && seen.insert(source.url.clone()));
 }
 
+/// Stable-sort `sources` so the URLs in `used` lead, in `used` order, while
+/// everything else keeps its relative order. Adapters pass the sources the
+/// answer actually rests on (its citations, plus the pages Grok opened on the
+/// Responses transport): raw search-hit lists otherwise bury them past the
+/// enrichment window and the response budget's tail trim, both of which
+/// assume citations lead. Run after `dedupe_sources` so the richer structured
+/// entry is the one that gets ranked.
+pub fn rank_used_first(sources: &mut [Source], used: &[Source]) {
+    if used.is_empty() {
+        return;
+    }
+    sources.sort_by_cached_key(|source| {
+        used.iter()
+            .position(|candidate| candidate.url == source.url)
+            .unwrap_or(usize::MAX)
+    });
+}
+
 /// Find inline citations of the form `[[n]](https://...)` and `[[n]](http://...)`
 /// in the response text and push them as sources under `provider`. We avoid the
 /// `regex` crate to keep the dependency footprint flat — a hand-rolled scanner is
@@ -17,7 +35,9 @@ pub fn dedupe_sources(sources: &mut Vec<Source>) {
 /// Grok Responses endpoints) frequently serialize real search citations as inline
 /// Markdown links in the answer text instead of structured citation fields. This
 /// is a last-resort extraction path — run it after the structured paths so
-/// `dedupe_sources` folds duplicates into the richer structured entries.
+/// `dedupe_sources` folds duplicates into the richer structured entries. Where
+/// no positioned annotations exist, the URLs it finds are also what
+/// `rank_used_first` moves to the front.
 ///
 /// On any malformed match (missing `]]`, missing `(`, missing closing `)`,
 /// non-numeric inside `[[...]]`), advance past the offending `[[` and keep

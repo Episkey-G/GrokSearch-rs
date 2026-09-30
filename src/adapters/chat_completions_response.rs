@@ -1,4 +1,4 @@
-use crate::adapters::sources::{dedupe_sources, extract_inline_bracket_citations};
+use crate::adapters::sources::{dedupe_sources, extract_inline_bracket_citations, rank_used_first};
 use crate::error::{GrokSearchError, Result};
 use crate::model::search::SearchResponse;
 use crate::model::source::Source;
@@ -7,7 +7,8 @@ use serde_json::Value;
 const PROVIDER_LABEL: &str = "openai_compatible";
 
 /// Parse an OpenAI-style chat-completions response. Source extraction runs
-/// four paths in priority order, then de-dupes by URL preserving order:
+/// four paths in priority order, de-dupes by URL preserving order, then ranks
+/// the inline-cited URLs first:
 ///
 ///   1. `choices[0].message.annotations[].url_citation` — OpenAI standard
 ///   2. `choices[0].message.citations` and top-level `citations` —
@@ -43,10 +44,14 @@ pub fn parse_chat_completions(raw: &Value) -> Result<SearchResponse> {
         collect_sources_from_value(ss, &mut sources);
     }
 
-    // path 4: inline [[n]](url) in the content
-    extract_inline_bracket_citations(&content, PROVIDER_LABEL, &mut sources);
+    // path 4: inline [[n]](url) in the content — also the ranking signal, so
+    // the cited URLs lead auto-search `search_sources` lists
+    let mut cited = Vec::new();
+    extract_inline_bracket_citations(&content, PROVIDER_LABEL, &mut cited);
+    sources.extend(cited.iter().cloned());
 
     dedupe_sources(&mut sources);
+    rank_used_first(&mut sources, &cited);
 
     if content.is_empty() && sources.is_empty() {
         return Err(GrokSearchError::Parse(

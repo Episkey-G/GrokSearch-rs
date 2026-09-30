@@ -234,6 +234,33 @@ fn extracts_array_form_message_content() {
 }
 
 #[test]
+fn ranks_inline_citations_ahead_of_search_sources() {
+    // Auto-search gateways list every hit in `search_sources`; the URLs the
+    // answer cites must lead, in citation order, not trail the hit list.
+    let raw = json!({
+        "choices": [{
+            "message": { "content": "a[[1]](https://m.example/c) b[[2]](https://m.example/b)." }
+        }],
+        "search_sources": [
+            { "url": "https://m.example/a", "title": "MA" },
+            { "url": "https://m.example/b", "title": "MB" },
+            { "url": "https://m.example/c", "title": "MC" }
+        ]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    let urls: Vec<_> = resp.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://m.example/c",
+            "https://m.example/b",
+            "https://m.example/a"
+        ]
+    );
+    assert_eq!(resp.sources[0].title.as_deref(), Some("MC"));
+}
+
+#[test]
 fn inline_scanner_recovers_after_malformed_citation() {
     // P2 fix: a single malformed `[[1]](no-close` previously aborted the scan,
     // dropping every subsequent valid citation.

@@ -221,3 +221,191 @@ fn inline_citations_dedupe_against_structured_sources() {
     assert!(urls.contains(&"https://openai.com/news"));
     assert!(urls.contains(&"https://openai.com/blog"));
 }
+
+// Live api.x.ai responses list every `web_search_call` hit ahead of the
+// message, so the few URLs the answer cites used to sit deep in a 40-190 entry
+// list, past the enrichment window and the response budget's tail trim. The
+// citations must lead in citation order, then the pages Grok opened (kept even
+// when no search hit listed them), then the remaining hits.
+#[test]
+fn ranks_citations_then_opened_pages_ahead_of_search_hits() {
+    let raw = serde_json::json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {"type": "url", "url": "https://example.com/hit"},
+                        {"type": "url", "url": "https://example.com/second"},
+                        {"type": "url", "url": "https://example.com/first", "title": "First"}
+                    ]
+                }
+            },
+            {
+                "type": "web_search_call",
+                "action": {"type": "open_page", "url": "https://example.com/opened"}
+            },
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "A.[[1]](https://example.com/first) B.[[2]](https://example.com/second)"
+                    }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    let urls: Vec<_> = parsed.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://example.com/first",
+            "https://example.com/second",
+            "https://example.com/opened",
+            "https://example.com/hit",
+        ]
+    );
+    // Ranking runs after dedupe, so the cited URL keeps its structured entry.
+    assert_eq!(parsed.sources[0].title.as_deref(), Some("First"));
+}
+
+// Without inline citations api.x.ai lists every source it encountered as a
+// zero-width (0..0) annotation — no evidence of use — so a response with no
+// citations and no opened page must keep its collection order.
+#[test]
+fn keeps_order_without_citations_or_opened_pages() {
+    let raw = serde_json::json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {"type": "url", "url": "https://example.com/a"},
+                        {"type": "url", "url": "https://example.com/b"}
+                    ]
+                }
+            },
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "An uncited answer.",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://example.com/c", "start_index": 0, "end_index": 0},
+                            {"type": "url_citation", "url": "https://example.com/a", "start_index": 0, "end_index": 0}
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    let urls: Vec<_> = parsed.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ]
+    );
+}
+
+// The live api.x.ai shape: a positioned `url_citation` annotation whose span
+// is the inline `[[n]](url)` link. The annotation carries the exact URL, so a
+// Wikipedia URL with parentheses ranks first even though the inline scanner
+// cuts its own copy at the first `)`; that truncated copy stays unranked.
+#[test]
+fn ranks_citations_whose_urls_contain_parentheses() {
+    let url = "https://en.wikipedia.org/wiki/Swift_(programming_language)";
+    let text = format!("Swift is a language.[[1]]({url})");
+    let end_index = text.len();
+    let raw = serde_json::json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {"type": "url", "url": "https://example.com/hit"},
+                        {"type": "url", "url": url}
+                    ]
+                }
+            },
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [
+                            {"type": "url_citation", "url": url, "title": "1", "start_index": 20, "end_index": end_index}
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    let urls: Vec<_> = parsed.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(urls[..2], [url, "https://example.com/hit"]);
+}
+
+// Opened pages are evidence only when the open completed, and they join after
+// the structured paths so a richer annotation entry for the same URL wins
+// dedupe. An answer whose only evidence is an opened page still yields a
+// source, so it no longer trips the `grok_sources_empty` fallback.
+#[test]
+fn keeps_completed_opened_pages_after_structured_entries() {
+    let raw = serde_json::json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "open_page", "url": "https://example.com/read"}
+            },
+            {
+                "type": "web_search_call",
+                "status": "failed",
+                "action": {"type": "open_page", "url": "https://example.com/unreachable"}
+            },
+            {
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "find_in_page", "url": "https://example.com/annotated", "pattern": "x"}
+            },
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "An uncited answer.",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://example.com/annotated", "title": "Annotated Page", "start_index": 0, "end_index": 0}
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    let urls: Vec<_> = parsed.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        ["https://example.com/read", "https://example.com/annotated"]
+    );
+    assert_eq!(parsed.sources[1].title.as_deref(), Some("Annotated Page"));
+}
