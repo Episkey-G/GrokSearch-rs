@@ -62,6 +62,11 @@ fn extracts_openai_style_annotations() {
     assert_eq!(resp.sources.len(), 2);
     assert_eq!(resp.sources[0].url, "https://a.example/1");
     assert_eq!(resp.sources[0].title.as_deref(), Some("A"));
+    // OpenAI emits url_citation annotations only for what the answer cites.
+    assert!(resp
+        .sources
+        .iter()
+        .all(|s| s.evidence.as_deref() == Some("cited")));
 }
 
 #[test]
@@ -231,6 +236,88 @@ fn extracts_array_form_message_content() {
     let resp = parse_chat_completions(&raw).expect("parse");
     assert_eq!(resp.content, "Hello, \nworld.");
     assert_eq!(resp.sources.len(), 1);
+}
+
+#[test]
+fn ranks_inline_citations_ahead_of_search_sources() {
+    // Auto-search gateways list every hit in `search_sources`; the URLs the
+    // answer cites must lead, in citation order, not trail the hit list.
+    let raw = json!({
+        "choices": [{
+            "message": { "content": "a[[1]](https://m.example/c) b[[2]](https://m.example/b)." }
+        }],
+        "search_sources": [
+            { "url": "https://m.example/a", "title": "MA" },
+            { "url": "https://m.example/b", "title": "MB" },
+            { "url": "https://m.example/c", "title": "MC" }
+        ]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    let urls: Vec<_> = resp.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://m.example/c",
+            "https://m.example/b",
+            "https://m.example/a"
+        ]
+    );
+    assert_eq!(resp.sources[0].title.as_deref(), Some("MC"));
+    let evidence: Vec<_> = resp.sources.iter().map(|s| s.evidence.as_deref()).collect();
+    assert_eq!(evidence, [Some("cited"), Some("cited"), None]);
+}
+
+#[test]
+fn zero_width_annotations_are_not_labelled_cited() {
+    // xAI lists sources its search merely encountered as zero-width (0..0)
+    // url_citation annotations; only a span that covers text is a citation.
+    let raw = json!({
+        "choices": [{
+            "message": {
+                "content": "Body.",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url_citation": { "url": "https://seen.example/a", "start_index": 0, "end_index": 0 }
+                    },
+                    {
+                        "type": "url_citation",
+                        "url_citation": { "url": "https://cited.example/b", "start_index": 0, "end_index": 4 }
+                    }
+                ]
+            }
+        }]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    let labelled: Vec<_> = resp
+        .sources
+        .iter()
+        .map(|s| (s.url.as_str(), s.evidence.as_deref()))
+        .collect();
+    assert_eq!(
+        labelled,
+        [
+            ("https://cited.example/b", Some("cited")),
+            ("https://seen.example/a", None)
+        ]
+    );
+}
+
+#[test]
+fn single_object_annotation_is_labelled_cited() {
+    // Path 1 accepts a lone annotation object as well as an array; it must be
+    // labelled like any other citation.
+    let raw = json!({
+        "choices": [{
+            "message": {
+                "content": "Body.",
+                "annotations": { "type": "url_citation", "url": "https://lone.example/a" }
+            }
+        }]
+    });
+    let resp = parse_chat_completions(&raw).expect("parse");
+    assert_eq!(resp.sources.len(), 1);
+    assert_eq!(resp.sources[0].evidence.as_deref(), Some("cited"));
 }
 
 #[test]

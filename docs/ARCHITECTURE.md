@@ -46,8 +46,8 @@ OAuth login is not a service boundary. `grok-search-rs login` temporarily listen
 
 Sources retain their origin through the `provider` field:
 
-- `grok_responses`: native Responses citation or web search source.
-- `{provider}_enrichment` (`tavily_enrichment`, `exa_enrichment`, `tinyfish_enrichment`, `firecrawl_enrichment`): supplemental source after Grok succeeds, named for the chain provider that served it.
+- `grok_responses`: native Responses citation or web search source. Listed by use: cited sources first (in citation order, `evidence: "cited"`), then pages Grok opened (`evidence: "opened"`), then the remaining search hits.
+- `{provider}_enrichment` (`tavily_enrichment`, `exa_enrichment`, `tinyfish_enrichment`, `firecrawl_enrichment`): supplemental source after Grok succeeds, named for the chain provider that served it. Listed after the sources Grok used and before the remaining search hits.
 - `{provider}_fallback` (`tavily_fallback`, `exa_fallback`, `tinyfish_fallback`, `firecrawl_fallback`): source used because Grok failed or was unverifiable, named for the chain provider that served it.
 - `tavily` / `exa` / `tinyfish` / `firecrawl`: direct provider source before orchestration rewrites provenance.
 

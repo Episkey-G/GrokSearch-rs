@@ -176,7 +176,7 @@ Notes:
 
 - `GROK_SEARCH_WEB_SEARCH=true` (default) appends `tools:[{"type":"web_search"}]` to the payload. Relays that auto‑search server‑side simply ignore it.
 - `GROK_SEARCH_X_SEARCH=true` is **silently ignored** on this transport (a one‑line stderr warning prints at startup). `x_search` only exists on the Responses API.
-- Source extraction reads four parallel paths and de‑duplicates by URL: OpenAI `annotations[].url_citation`, Perplexity‑style `citations`, top‑level `search_sources[]`, and inline `[[n]](url)` markers.
+- Source extraction reads four parallel paths and de‑duplicates by URL: OpenAI `annotations[].url_citation`, Perplexity‑style `citations`, top‑level `search_sources[]`, and inline `[[n]](url)` markers. Inline‑cited URLs are listed first.
 
 ### Source providers (shared)
 
@@ -196,6 +196,7 @@ Notes:
 | `GROK_SEARCH_FETCH_MAX_CHARS` | unset | Default char cap on `web_fetch`. |
 | `GROK_SEARCH_MAX_INLINE_SOURCES` | `5` | Max `web_search` sources carrying inline content; the rest are metadata‑only. |
 | `GROK_SEARCH_RESPONSE_MAX_CHARS` | `45000` | Whole‑response char budget for `web_search`; over‑budget output is truncated tail‑first with `truncated: true`. Sized to keep the serialized result under the MCP client token ceiling (Claude Code default `MAX_MCP_OUTPUT_TOKENS=25000`). |
+| `GROK_SEARCH_USED_SOURCES_ONLY` | `false` | `web_search` lists only the sources the answer cites or Grok opened (`evidence`), plus supplemental sources; the remaining search hits stay in the session cache for `get_sources`. Perplexity‑style `citations` lists are not labelled. |
 
 ### Source extraction (`web_fetch` specialists / `web_search` enrichment)
 

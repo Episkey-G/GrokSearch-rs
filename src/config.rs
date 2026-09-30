@@ -57,6 +57,7 @@ pub struct Config {
     pub enrich_max_chars: usize,
     pub max_inline_sources: usize,
     pub response_max_chars: usize,
+    pub used_sources_only: bool,
     /// Where the config file was looked for, whether or not one was there.
     /// Worth reporting even when absent — it tells the operator where to put
     /// one.
@@ -154,6 +155,7 @@ impl std::fmt::Debug for Config {
             .field("enrich_max_chars", &self.enrich_max_chars)
             .field("max_inline_sources", &self.max_inline_sources)
             .field("response_max_chars", &self.response_max_chars)
+            .field("used_sources_only", &self.used_sources_only)
             .field("config_file_path", &self.config_file_path)
             .field("config_file_state", &self.config_file_state)
             .finish()
@@ -201,6 +203,7 @@ struct ConfigFile {
     enrich_max_chars: Option<usize>,
     max_inline_sources: Option<usize>,
     response_max_chars: Option<usize>,
+    used_sources_only: Option<bool>,
 }
 
 impl ConfigFile {
@@ -296,6 +299,10 @@ impl ConfigFile {
         insert(
             "GROK_SEARCH_RESPONSE_MAX_CHARS",
             self.response_max_chars.map(|n| n.to_string()),
+        );
+        insert(
+            "GROK_SEARCH_USED_SOURCES_ONLY",
+            self.used_sources_only.map(|b| b.to_string()),
         );
         out
     }
@@ -435,6 +442,7 @@ impl Config {
             enrich_max_chars: usize_value(&map, "GROK_SEARCH_ENRICH_MAX_CHARS", 15000),
             max_inline_sources: usize_value(&map, "GROK_SEARCH_MAX_INLINE_SOURCES", 5),
             response_max_chars: usize_value(&map, "GROK_SEARCH_RESPONSE_MAX_CHARS", 45_000),
+            used_sources_only: bool_value(&map, "GROK_SEARCH_USED_SOURCES_ONLY", false),
             // This is the environment-only constructor; no file was consulted.
             // `load_from` overwrites both after merging one in.
             config_file_path: None,
@@ -639,6 +647,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# grok-search-rs global configuration
 # enrich_max_chars      = 15000      # per-source inline content char cap
 # max_inline_sources    = 5          # max sources carrying inline content per response
 # response_max_chars    = 45000      # whole-response char budget (answer + inline content); kept below the MCP client token ceiling (default ~25k tokens) after JSON serialization
+# used_sources_only     = false      # web_search lists only cited/opened + supplemental sources; the rest via get_sources
 "#;
 
 /// Read and parse the config file, reporting what happened alongside whatever

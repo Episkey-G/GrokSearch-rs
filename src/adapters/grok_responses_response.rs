@@ -1,4 +1,4 @@
-use crate::adapters::sources::{dedupe_sources, extract_inline_bracket_citations};
+use crate::adapters::sources::{dedupe_sources, extract_inline_bracket_citations, rank_used_first};
 use crate::error::{GrokSearchError, Result};
 use crate::model::search::SearchResponse;
 use crate::model::source::Source;
@@ -7,6 +7,8 @@ use serde_json::Value;
 pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
     let mut text_parts = Vec::new();
     let mut sources = Vec::new();
+    let mut cited = Vec::new();
+    let mut opened = Vec::new();
 
     if let Some(output_text) = raw.get("output_text").and_then(Value::as_str) {
         push_nonempty(&mut text_parts, output_text);
@@ -14,7 +16,7 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
 
     if let Some(output) = raw.get("output").and_then(Value::as_array) {
         for item in output {
-            collect_output_item(item, &mut text_parts, &mut sources);
+            collect_output_item(item, &mut text_parts, &mut sources, &mut cited, &mut opened);
         }
     }
 
@@ -26,11 +28,21 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
 
     // Last-resort path: proxied / OpenAI-compatible Grok gateways often inline
     // real search citations as `[[n]](url)` Markdown in the answer text instead
-    // of the structured fields above. Harvest those after the structured paths
-    // so dedupe folds duplicates into the richer structured entries.
-    extract_inline_bracket_citations(&content, "grok_responses", &mut sources);
+    // of the structured fields above. Harvest those (and the opened pages)
+    // after the structured paths so dedupe folds duplicates into the richer
+    // structured entries.
+    let mut inline = Vec::new();
+    extract_inline_bracket_citations(&content, "grok_responses", &mut inline);
+    sources.extend(inline.iter().cloned());
+    sources.extend(opened.iter().cloned());
 
     dedupe_sources(&mut sources);
+    // Label and rank what the answer rests on ahead of the raw search hits: the
+    // citations (api.x.ai's positioned annotations carry the exact URLs;
+    // gateways without them only have the inline links), then the pages Grok
+    // opened.
+    let cited = if cited.is_empty() { inline } else { cited };
+    rank_used_first(&mut sources, &cited, &opened);
 
     if content.is_empty() && sources.is_empty() {
         return Err(GrokSearchError::Parse(
@@ -41,10 +53,31 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
     Ok(SearchResponse { content, sources })
 }
 
-fn collect_output_item(item: &Value, text_parts: &mut Vec<String>, sources: &mut Vec<Source>) {
+fn collect_output_item(
+    item: &Value,
+    text_parts: &mut Vec<String>,
+    sources: &mut Vec<Source>,
+    cited: &mut Vec<Source>,
+    opened: &mut Vec<Source>,
+) {
     if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
-        if let Some(action_sources) = item.get("action").and_then(|action| action.get("sources")) {
+        let action = item.get("action");
+        if let Some(action_sources) = action.and_then(|action| action.get("sources")) {
             collect_sources_from_value(action_sources, sources);
+        }
+        // `open_page` / `find_in_page` actions carry no `sources`, only the
+        // page Grok read, which no search hit may list. A failed open read
+        // nothing, so it is not evidence.
+        let completed = matches!(
+            item.get("status").and_then(Value::as_str),
+            None | Some("completed")
+        );
+        if let Some(url) = action
+            .and_then(|action| action.get("url"))
+            .and_then(Value::as_str)
+            .filter(|_| completed)
+        {
+            opened.push(Source::new(url, "grok_responses"));
         }
     }
 
@@ -55,6 +88,15 @@ fn collect_output_item(item: &Value, text_parts: &mut Vec<String>, sources: &mut
             }
             if let Some(annotations) = block.get("annotations") {
                 collect_sources_from_value(annotations, sources);
+                // A `url_citation` whose span covers text is one the answer
+                // cites; zero-width (0..0) ones only list what the search
+                // encountered.
+                for annotation in annotations.as_array().into_iter().flatten() {
+                    let index = |key| annotation.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    if index("end_index") > index("start_index") {
+                        collect_one_source(annotation, cited);
+                    }
+                }
             }
             if let Some(citations) = block.get("citations") {
                 collect_sources_from_value(citations, sources);

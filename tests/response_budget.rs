@@ -7,11 +7,11 @@
 //! get the rest.
 
 use async_trait::async_trait;
-use grok_search_rs::error::Result;
-use grok_search_rs::model::search::SearchFilters;
+use grok_search_rs::error::{GrokSearchError, Result};
+use grok_search_rs::model::search::{SearchFilters, SearchRequest, SearchResponse};
 use grok_search_rs::model::source::{FetchedPage, Source};
 use grok_search_rs::model::tool::WebSearchInput;
-use grok_search_rs::service::{SearchService, SourceProvider};
+use grok_search_rs::service::{AiProvider, SearchService, SourceProvider};
 
 /// Supplemental provider whose generic fetch returns a body of fixed length,
 /// so per-source inline content size is deterministic.
@@ -375,4 +375,165 @@ async fn response_format_invalid_value_is_rejected() {
         err.to_string().contains("response_format"),
         "error must name the offending parameter: {err}"
     );
+}
+
+/// Grok result as the adapters shape it: what the answer rests on is labelled
+/// and ranked ahead of the raw search hits.
+struct UsedSourcesAiProvider;
+
+#[async_trait]
+impl AiProvider for UsedSourcesAiProvider {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        let used = |url: &str, evidence: &'static str| Source {
+            evidence: Some(evidence.into()),
+            ..Source::new(url, "grok_responses")
+        };
+        Ok(SearchResponse {
+            content: "answer".to_string(),
+            sources: vec![
+                used("https://grok.example/cited", "cited"),
+                used("https://grok.example/opened", "opened"),
+                Source::new("https://grok.example/hit-0", "grok_responses"),
+                Source::new("https://grok.example/hit-1", "grok_responses"),
+            ],
+        })
+    }
+}
+
+fn used_sources_service(used_sources_only: &str) -> SearchService {
+    SearchService::fake_custom(
+        Some(std::sync::Arc::new(UsedSourcesAiProvider)),
+        std::sync::Arc::new(FixedLenFetchProvider { len: 50 }),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "2"),
+            ("GROK_SEARCH_USED_SOURCES_ONLY", used_sources_only),
+        ],
+    )
+}
+
+// Supplemental sources follow what the answer rests on instead of trailing the
+// raw search hits, and GROK_SEARCH_USED_SOURCES_ONLY returns exactly that head
+// while the session cache keeps everything for get_sources.
+#[tokio::test]
+async fn used_sources_only_returns_the_labelled_head_and_caches_the_rest() {
+    let query = || WebSearchInput {
+        query: "q".to_string(),
+        response_format: Some("concise".to_string()),
+        ..Default::default()
+    };
+    let urls = |sources: &[Source]| sources.iter().map(|s| s.url.clone()).collect::<Vec<_>>();
+    let head = [
+        "https://grok.example/cited",
+        "https://grok.example/opened",
+        "https://example.com/source-0",
+        "https://example.com/source-1",
+    ];
+    let everything = [
+        &head[..],
+        &["https://grok.example/hit-0", "https://grok.example/hit-1"],
+    ]
+    .concat();
+
+    let full = used_sources_service("false")
+        .web_search(query())
+        .await
+        .expect("search output");
+    assert_eq!(urls(&full.sources), everything);
+
+    let service = used_sources_service("true");
+    let output = service.web_search(query()).await.expect("search output");
+    assert_eq!(urls(&output.sources), head);
+    assert_eq!(output.sources_count, everything.len());
+
+    let cached = service
+        .get_sources(&output.session_id, 0, None)
+        .await
+        .expect("cached sources");
+    assert_eq!(urls(&cached.sources), everything);
+    assert_eq!(cached.sources[0].evidence.as_deref(), Some("cited"));
+}
+
+// The filtered list is a prefix of the cache, so every budget note's
+// get_sources offset still names the source it was written for.
+#[tokio::test]
+async fn used_sources_only_keeps_budget_note_offsets_valid() {
+    let service = SearchService::fake_custom(
+        Some(std::sync::Arc::new(UsedSourcesAiProvider)),
+        std::sync::Arc::new(FixedLenFetchProvider { len: 2_000 }),
+        None,
+        [
+            ("GROK_SEARCH_EXTRA_SOURCES", "2"),
+            ("GROK_SEARCH_USED_SOURCES_ONLY", "true"),
+            ("GROK_SEARCH_RESPONSE_MAX_CHARS", "3000"),
+        ],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "q".to_string(),
+            response_format: Some("detailed".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("search output");
+    assert!(output.truncated);
+
+    let cached = service
+        .get_sources(&output.session_id, 0, None)
+        .await
+        .expect("cached sources");
+    let noted: Vec<_> = output
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let offset = source
+                .content
+                .as_deref()?
+                .split("offset=")
+                .nth(1)?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<usize>()
+                .ok()?;
+            Some((source.url.as_str(), offset))
+        })
+        .collect();
+    assert!(!noted.is_empty(), "the budget must leave recovery notes");
+    for (url, offset) in noted {
+        assert_eq!(cached.sources[offset].url, url);
+    }
+}
+
+struct FailingAiProvider;
+
+#[async_trait]
+impl AiProvider for FailingAiProvider {
+    async fn search(&self, _request: &SearchRequest) -> Result<SearchResponse> {
+        Err(GrokSearchError::Provider("HTTP 500".to_string()))
+    }
+}
+
+// The switch filters only a successful Grok answer: fallback sources carry no
+// `evidence` and must all come back when Grok fails.
+#[tokio::test]
+async fn used_sources_only_leaves_the_fallback_path_alone() {
+    let service = SearchService::fake_custom(
+        Some(std::sync::Arc::new(FailingAiProvider)),
+        std::sync::Arc::new(FixedLenFetchProvider { len: 50 }),
+        None,
+        [("GROK_SEARCH_USED_SOURCES_ONLY", "true")],
+    );
+
+    let output = service
+        .web_search(WebSearchInput {
+            query: "q".to_string(),
+            response_format: Some("concise".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("fallback output");
+
+    assert!(output.fallback_used);
+    assert_eq!(output.sources.len(), 5);
 }

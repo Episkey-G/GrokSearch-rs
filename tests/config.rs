@@ -302,6 +302,7 @@ fallback_sources      = 9
 fetch_max_chars       = 12345
 cache_size            = 128
 timeout_seconds       = 30
+used_sources_only     = true
 "#,
     )
     .unwrap();
@@ -331,6 +332,7 @@ timeout_seconds       = 30
     assert_eq!(cfg.fetch_max_chars, Some(12345));
     assert_eq!(cfg.cache_size, 128);
     assert_eq!(cfg.timeout.as_secs(), 30);
+    assert!(cfg.used_sources_only);
 }
 
 #[test]
@@ -482,13 +484,16 @@ fn response_budget_defaults_and_env_overrides() {
     let defaults = Config::from_env_map([] as [(&str, &str); 0]);
     assert_eq!(defaults.max_inline_sources, 5);
     assert_eq!(defaults.response_max_chars, 45_000);
+    assert!(!defaults.used_sources_only);
 
     let overridden = Config::from_env_map([
         ("GROK_SEARCH_MAX_INLINE_SOURCES", "2"),
         ("GROK_SEARCH_RESPONSE_MAX_CHARS", "30000"),
+        ("GROK_SEARCH_USED_SOURCES_ONLY", "true"),
     ]);
     assert_eq!(overridden.max_inline_sources, 2);
     assert_eq!(overridden.response_max_chars, 30_000);
+    assert!(overridden.used_sources_only);
 }
 
 #[test]

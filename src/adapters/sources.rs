@@ -8,6 +8,34 @@ pub fn dedupe_sources(sources: &mut Vec<Source>) {
     sources.retain(|source| !source.url.trim().is_empty() && seen.insert(source.url.clone()));
 }
 
+/// Label and stable-sort `sources` so what the answer rests on leads: the
+/// `cited` URLs in citation order (`evidence: "cited"`), then the `opened`
+/// pages (`evidence: "opened"`), then everything else in its original order.
+/// Raw search-hit lists otherwise bury them past the enrichment window and the
+/// response budget's tail trim, both of which assume citations lead. Run after
+/// `dedupe_sources` so the richer structured entry is the one that gets
+/// ranked.
+pub fn rank_used_first(sources: &mut [Source], cited: &[Source], opened: &[Source]) {
+    let used: Vec<(&str, &'static str)> = cited
+        .iter()
+        .map(|source| (source.url.as_str(), "cited"))
+        .chain(opened.iter().map(|source| (source.url.as_str(), "opened")))
+        .collect();
+    if used.is_empty() {
+        return;
+    }
+    for source in sources.iter_mut() {
+        if let Some(&(_, evidence)) = used.iter().find(|(url, _)| *url == source.url) {
+            source.evidence = Some(evidence.into());
+        }
+    }
+    sources.sort_by_cached_key(|source| {
+        used.iter()
+            .position(|(url, _)| *url == source.url)
+            .unwrap_or(usize::MAX)
+    });
+}
+
 /// Find inline citations of the form `[[n]](https://...)` and `[[n]](http://...)`
 /// in the response text and push them as sources under `provider`. We avoid the
 /// `regex` crate to keep the dependency footprint flat — a hand-rolled scanner is
@@ -17,7 +45,9 @@ pub fn dedupe_sources(sources: &mut Vec<Source>) {
 /// Grok Responses endpoints) frequently serialize real search citations as inline
 /// Markdown links in the answer text instead of structured citation fields. This
 /// is a last-resort extraction path — run it after the structured paths so
-/// `dedupe_sources` folds duplicates into the richer structured entries.
+/// `dedupe_sources` folds duplicates into the richer structured entries. Where
+/// no positioned annotations exist, the URLs it finds are also what
+/// `rank_used_first` moves to the front.
 ///
 /// On any malformed match (missing `]]`, missing `(`, missing closing `)`,
 /// non-numeric inside `[[...]]`), advance past the offending `[[` and keep
