@@ -272,6 +272,15 @@ fn ranks_citations_then_opened_pages_ahead_of_search_hits() {
     );
     // Ranking runs after dedupe, so the cited URL keeps its structured entry.
     assert_eq!(parsed.sources[0].title.as_deref(), Some("First"));
+    let evidence: Vec<_> = parsed
+        .sources
+        .iter()
+        .map(|s| s.evidence.as_deref())
+        .collect();
+    assert_eq!(
+        evidence,
+        [Some("cited"), Some("cited"), Some("opened"), None]
+    );
 }
 
 // Without inline citations api.x.ai lists every source it encountered as a
@@ -318,6 +327,7 @@ fn keeps_order_without_citations_or_opened_pages() {
             "https://example.com/c",
         ]
     );
+    assert!(parsed.sources.iter().all(|s| s.evidence.is_none()));
 }
 
 // The live api.x.ai shape: a positioned `url_citation` annotation whose span
@@ -408,4 +418,8 @@ fn keeps_completed_opened_pages_after_structured_entries() {
         ["https://example.com/read", "https://example.com/annotated"]
     );
     assert_eq!(parsed.sources[1].title.as_deref(), Some("Annotated Page"));
+    assert!(parsed
+        .sources
+        .iter()
+        .all(|s| s.evidence.as_deref() == Some("opened")));
 }

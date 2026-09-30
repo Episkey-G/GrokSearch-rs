@@ -809,8 +809,19 @@ impl SearchService {
 
         let mut enrichment = raw.sources;
         enrichment.truncate(effective_extra_sources);
-        let enrichment = with_provider(enrichment, enrichment_label(raw.origin));
-        let merged = merge_sources(response.sources, enrichment);
+        let label = enrichment_label(raw.origin);
+        let enrichment = with_provider(enrichment, label.clone());
+        let mut merged = merge_sources(response.sources, enrichment);
+        // Supplemental sources follow what the answer rests on (the head the
+        // adapters label with `evidence`) instead of trailing every raw search
+        // hit. Stable, so each group keeps its order; `used_sources_only`
+        // returns exactly groups 0 and 1.
+        let group = |source: &Source| match source.evidence {
+            Some(_) => 0,
+            None if source.provider == label.as_str() => 1,
+            None => 2,
+        };
+        merged.sort_by_key(group);
         // SRCH-04 dual gate (zero-regression): skip enrichment when the caller
         // opted out OR there are no supplemental sources. Gating on
         // include_content alone would leave content populated at extra_sources=0
@@ -843,6 +854,11 @@ impl SearchService {
         // The cache keeps the full enriched content; only the returned copy is
         // trimmed to the response budget so drill-down loses nothing.
         let mut out_sources = (*merged_arc).clone();
+        if self.config.used_sources_only {
+            // A prefix of the cache after the sort above, so budget notes'
+            // `get_sources` offsets stay valid.
+            out_sources.retain(|source| group(source) < 2);
+        }
         let truncated = apply_response_budget(
             response.content.chars().count(),
             &mut out_sources,
@@ -2442,6 +2458,11 @@ fn source_weight(source: &Source) -> usize {
         + opt_chars(&source.title)
         + opt_chars(&source.description)
         + opt_chars(&source.published_date)
+        + source
+            .evidence
+            .as_deref()
+            .map(|e| e.chars().count())
+            .unwrap_or(0)
         + source
             .content
             .as_deref()

@@ -8,20 +8,30 @@ pub fn dedupe_sources(sources: &mut Vec<Source>) {
     sources.retain(|source| !source.url.trim().is_empty() && seen.insert(source.url.clone()));
 }
 
-/// Stable-sort `sources` so the URLs in `used` lead, in `used` order, while
-/// everything else keeps its relative order. Adapters pass the sources the
-/// answer actually rests on (its citations, plus the pages Grok opened on the
-/// Responses transport): raw search-hit lists otherwise bury them past the
-/// enrichment window and the response budget's tail trim, both of which
-/// assume citations lead. Run after `dedupe_sources` so the richer structured
-/// entry is the one that gets ranked.
-pub fn rank_used_first(sources: &mut [Source], used: &[Source]) {
+/// Label and stable-sort `sources` so what the answer rests on leads: the
+/// `cited` URLs in citation order (`evidence: "cited"`), then the `opened`
+/// pages (`evidence: "opened"`), then everything else in its original order.
+/// Raw search-hit lists otherwise bury them past the enrichment window and the
+/// response budget's tail trim, both of which assume citations lead. Run after
+/// `dedupe_sources` so the richer structured entry is the one that gets
+/// ranked.
+pub fn rank_used_first(sources: &mut [Source], cited: &[Source], opened: &[Source]) {
+    let used: Vec<(&str, &'static str)> = cited
+        .iter()
+        .map(|source| (source.url.as_str(), "cited"))
+        .chain(opened.iter().map(|source| (source.url.as_str(), "opened")))
+        .collect();
     if used.is_empty() {
         return;
     }
+    for source in sources.iter_mut() {
+        if let Some(&(_, evidence)) = used.iter().find(|(url, _)| *url == source.url) {
+            source.evidence = Some(evidence.into());
+        }
+    }
     sources.sort_by_cached_key(|source| {
         used.iter()
-            .position(|candidate| candidate.url == source.url)
+            .position(|(url, _)| *url == source.url)
             .unwrap_or(usize::MAX)
     });
 }

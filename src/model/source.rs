@@ -9,6 +9,11 @@ pub struct Source {
     pub title: Option<String>,
     pub description: Option<String>,
     pub published_date: Option<String>,
+    /// How the answer used this source: `"cited"` (an inline citation) or
+    /// `"opened"` (a page Grok opened). `None` → field absent from JSON: a raw
+    /// search hit or a supplemental source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Cow<'static, str>>,
     /// Inline source content from the `resolve_content` pipeline.
     /// `None` → field absent from JSON (`include_content=false` path, backward-compat).
     /// `Some` → non-empty string: structured markdown or a deterministic failure note.
@@ -24,6 +29,7 @@ impl Source {
             title: None,
             description: None,
             published_date: None,
+            evidence: None,
             content: None,
         }
     }

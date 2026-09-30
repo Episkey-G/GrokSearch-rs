@@ -32,14 +32,19 @@ fn rank_used_first_leads_in_used_order_and_keeps_the_rest_stable() {
         Source::new("https://example.com/d", "grok_responses"),
     ];
     // Duplicates and URLs absent from `sources` must not disturb the order.
-    let used = [
+    let cited = [
         Source::new("https://example.com/d", "grok_responses"),
         Source::new("https://example.com/b", "grok_responses"),
         Source::new("https://example.com/b", "grok_responses"),
         Source::new("https://example.com/missing", "grok_responses"),
     ];
+    // A page both cited and opened ranks and is labelled as cited.
+    let opened = [
+        Source::new("https://example.com/c", "grok_responses"),
+        Source::new("https://example.com/d", "grok_responses"),
+    ];
 
-    rank_used_first(&mut sources, &used);
+    rank_used_first(&mut sources, &cited, &opened);
 
     let urls: Vec<_> = sources.iter().map(|s| s.url.as_str()).collect();
     assert_eq!(
@@ -47,11 +52,16 @@ fn rank_used_first_leads_in_used_order_and_keeps_the_rest_stable() {
         [
             "https://example.com/d",
             "https://example.com/b",
-            "https://example.com/a",
             "https://example.com/c",
+            "https://example.com/a",
         ]
     );
-    assert_eq!(sources[2].title.as_deref(), Some("A"));
+    let evidence: Vec<_> = sources.iter().map(|s| s.evidence.as_deref()).collect();
+    assert_eq!(
+        evidence,
+        [Some("cited"), Some("cited"), Some("opened"), None]
+    );
+    assert_eq!(sources[3].title.as_deref(), Some("A"));
 }
 
 #[test]
@@ -61,8 +71,9 @@ fn rank_used_first_without_used_sources_keeps_the_order() {
         Source::new("https://example.com/a", "grok_responses"),
     ];
 
-    rank_used_first(&mut sources, &[]);
+    rank_used_first(&mut sources, &[], &[]);
 
     assert_eq!(sources[0].url, "https://example.com/b");
     assert_eq!(sources[1].url, "https://example.com/a");
+    assert!(sources.iter().all(|s| s.evidence.is_none()));
 }

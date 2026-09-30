@@ -37,12 +37,12 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
     sources.extend(opened.iter().cloned());
 
     dedupe_sources(&mut sources);
-    // Rank what the answer rests on ahead of the raw search hits: the citations
-    // (api.x.ai's positioned annotations carry the exact URLs; gateways without
-    // them only have the inline links), then the pages Grok opened.
-    let mut used = if cited.is_empty() { inline } else { cited };
-    used.extend(opened);
-    rank_used_first(&mut sources, &used);
+    // Label and rank what the answer rests on ahead of the raw search hits: the
+    // citations (api.x.ai's positioned annotations carry the exact URLs;
+    // gateways without them only have the inline links), then the pages Grok
+    // opened.
+    let cited = if cited.is_empty() { inline } else { cited };
+    rank_used_first(&mut sources, &cited, &opened);
 
     if content.is_empty() && sources.is_empty() {
         return Err(GrokSearchError::Parse(

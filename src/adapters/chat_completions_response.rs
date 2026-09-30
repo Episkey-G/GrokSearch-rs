@@ -7,8 +7,8 @@ use serde_json::Value;
 const PROVIDER_LABEL: &str = "openai_compatible";
 
 /// Parse an OpenAI-style chat-completions response. Source extraction runs
-/// four paths in priority order, de-dupes by URL preserving order, then ranks
-/// the inline-cited URLs first:
+/// four paths in priority order, de-dupes by URL preserving order, then labels
+/// and ranks the cited URLs (paths 1 and 4) first:
 ///
 ///   1. `choices[0].message.annotations[].url_citation` — OpenAI standard
 ///   2. `choices[0].message.citations` and top-level `citations` —
@@ -24,10 +24,20 @@ pub fn parse_chat_completions(raw: &Value) -> Result<SearchResponse> {
         .to_string();
 
     let mut sources: Vec<Source> = Vec::new();
+    let mut cited: Vec<Source> = Vec::new();
 
     // path 1: message.annotations
     if let Some(anns) = raw.pointer("/choices/0/message/annotations") {
         collect_sources_from_value(anns, &mut sources);
+        // Array or a lone object, like `collect_sources_from_value`.
+        let anns = anns
+            .as_array()
+            .map_or(std::slice::from_ref(anns), Vec::as_slice);
+        for ann in anns {
+            if cites_answer_text(ann) {
+                collect_one(ann, &mut cited);
+            }
+        }
     }
 
     // path 2a: message.citations
@@ -46,12 +56,13 @@ pub fn parse_chat_completions(raw: &Value) -> Result<SearchResponse> {
 
     // path 4: inline [[n]](url) in the content — also the ranking signal, so
     // the cited URLs lead auto-search `search_sources` lists
-    let mut cited = Vec::new();
-    extract_inline_bracket_citations(&content, PROVIDER_LABEL, &mut cited);
-    sources.extend(cited.iter().cloned());
+    let mut inline = Vec::new();
+    extract_inline_bracket_citations(&content, PROVIDER_LABEL, &mut inline);
+    sources.extend(inline.iter().cloned());
+    cited.extend(inline);
 
     dedupe_sources(&mut sources);
-    rank_used_first(&mut sources, &cited);
+    rank_used_first(&mut sources, &cited, &[]);
 
     if content.is_empty() && sources.is_empty() {
         return Err(GrokSearchError::Parse(
@@ -60,6 +71,19 @@ pub fn parse_chat_completions(raw: &Value) -> Result<SearchResponse> {
     }
 
     Ok(SearchResponse { content, sources })
+}
+
+/// OpenAI emits `url_citation` annotations for what the answer cites. A
+/// zero-width (0..0) span is the shape xAI uses to list sources its search
+/// merely encountered, so it is no evidence of use; an annotation without
+/// indices has no span to check and counts as cited.
+fn cites_answer_text(annotation: &Value) -> bool {
+    let citation = annotation.get("url_citation").unwrap_or(annotation);
+    let index = |key| citation.get(key).and_then(Value::as_u64);
+    match (index("start_index"), index("end_index")) {
+        (Some(start), Some(end)) => end > start,
+        _ => true,
+    }
 }
 
 fn collect_sources_from_value(value: &Value, out: &mut Vec<Source>) {

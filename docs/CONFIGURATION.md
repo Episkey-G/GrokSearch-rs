@@ -212,6 +212,7 @@ content; truncated sources carry a note pointing at `web_fetch(url)` /
 |---|---|---|
 | `GROK_SEARCH_MAX_INLINE_SOURCES` | `5` | Maximum sources that carry inline `content` per `web_search` response; the rest return metadata only. |
 | `GROK_SEARCH_RESPONSE_MAX_CHARS` | `60000` | Whole-response character budget (answer + per-source metadata and inline content). Over-budget responses truncate inline content tail-first, then drop trailing sources (always keeping at least one) and set `truncated: true`. |
+| `GROK_SEARCH_USED_SOURCES_ONLY` | `false` | `web_search` lists only the sources the answer cites (`evidence: "cited"`) or Grok opened (`evidence: "opened"`), plus supplemental sources. The remaining search hits stay in the session cache: `sources_count` still counts them and `get_sources` returns them. Citations are recognized from `url_citation` annotations whose span covers answer text (on the OpenAI-compatible transport also annotations without indices) and from inline `[[n]](url)` links; Perplexity-style `citations` lists are not labelled, so on such relays only supplemental sources are returned. |
 
 ## Config file
 
@@ -276,6 +277,7 @@ Unknown keys are rejected by the loader — typos surface as parse errors instea
 | `enrich_max_chars` | `GROK_SEARCH_ENRICH_MAX_CHARS` |
 | `max_inline_sources` | `GROK_SEARCH_MAX_INLINE_SOURCES` |
 | `response_max_chars` | `GROK_SEARCH_RESPONSE_MAX_CHARS` |
+| `used_sources_only` | `GROK_SEARCH_USED_SOURCES_ONLY` |
 
 Example — minimum useful file:
 
