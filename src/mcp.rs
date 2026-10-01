@@ -287,7 +287,7 @@ fn tools_list() -> Value {
         "tools": [
             {
                 "name": "web_search",
-                "description": "Use for discovery — when you don't have a specific URL and need to find information, debug an error, research a topic, or track down an issue or news item. Returns an AI-synthesised answer plus a source list. By default the first few sources carry inline content (max_inline_sources, default 5); the rest are metadata-only — drill into any of them with web_fetch(url). The whole response is capped by a character budget; when truncated=true, trimmed sources carry a note telling you how to recover the full text via web_fetch or get_sources. Pass response_format=\"concise\" for answer + source metadata only. If you already know the exact page URL, use web_fetch instead.",
+                "description": "Start here for open-ended problems and discovery. Give the full problem and context in query. Returns an answer synthesized by Grok with substantial context and sources. If truncated=true, use web_fetch(url) for source text or get_sources(session_id, offset, limit) to page cached sources. Use web_fetch for a known page.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["query"],
@@ -296,39 +296,39 @@ fn tools_list() -> Value {
                         "extra_sources": {
                             "type": "integer",
                             "minimum": 0,
-                            "description": "Optional supplemental source count, served by the configured source chain (default order: Tavily, then Exa, TinyFish, Firecrawl — first provider with results wins; GROK_SEARCH_SOURCE_PROVIDERS overrides). If omitted, GROK_SEARCH_EXTRA_SOURCES is used."
+                            "description": "Supplemental source count; omitted uses the server default."
                         },
                         "recency_days": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Restrict supplemental results to sources published within the last N days. Honored natively by Tavily (days+topic=news), Exa (startPublishedDate), and TinyFish (recency window); providers that cannot honor filters (Firecrawl) are skipped for filtered requests. Also hinted to Grok prompt."
+                            "description": "Supplemental sources published within N days; soft hint for Grok."
                         },
                         "include_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Only return supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft preference."
+                            "description": "Restrict supplemental sources to these domains; soft preference for Grok."
                         },
                         "exclude_domains": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Suppress supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft instruction."
+                            "description": "Exclude these domains from supplemental sources; soft instruction for Grok."
                         },
                         "include_content": {
                             "type": "boolean",
                             "default": true,
-                            "description": "Inline source content via the resolve_content pipeline. Default true. Pass false to get summary + source-list only (legacy behavior, no content field in sources). Superseded by response_format when both are set."
+                            "description": "Include source text; response_format takes precedence."
                         },
                         "response_format": {
                             "type": "string",
                             "enum": ["concise", "detailed"],
-                            "description": "concise = synthesized answer + source metadata only (smallest payload); detailed = inline source content, subject to the response budget. Takes precedence over include_content."
+                            "description": "concise: answer + source metadata. detailed: also source text within budget. Overrides include_content."
                         }
                     }
                 }
             },
             {
                 "name": "get_sources",
-                "description": "Return cached sources from a previous web_search call by session_id. Use to re-examine sources already retrieved without issuing a new search — it reuses the prior session and runs no new search or fetch. Paginate with offset/limit: the response reports total_sources and, when more pages remain, next_offset to pass as the next offset.",
+                "description": "Read cached web_search sources by session_id; no new search or fetch. Paginate with offset/limit and continue with next_offset.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["session_id"],
@@ -338,19 +338,19 @@ fn tools_list() -> Value {
                             "type": "integer",
                             "minimum": 0,
                             "default": 0,
-                            "description": "Index of the first source to return. Use next_offset from the previous page to continue."
+                            "description": "Start index; use next_offset to continue."
                         },
                         "limit": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Max sources in this page. Omit to return all remaining sources (still subject to the response budget)."
+                            "description": "Max sources in this page; omitted returns remaining sources within budget."
                         }
                     }
                 }
             },
             {
                 "name": "web_fetch",
-                "description": "Use when you already have a specific URL and want to read a single page in depth. GitHub issue/PR, StackOverflow (StackExchange), arXiv, and Wikipedia URLs are automatically parsed into structured, de-noised Markdown ready to feed an LLM; all other pages fall back to generic extraction. Returns {url, content, original_length, truncated, source_type, fallback_reason?}. If you don't have a URL yet and need to discover sources, use web_search instead.",
+                "description": "Use to read a single page at a specific URL as cleaned Markdown. Use web_search for discovery.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["url"],
@@ -359,7 +359,7 @@ fn tools_list() -> Value {
                         "max_chars": {
                             "type": "integer",
                             "minimum": 1,
-                            "description": "Optional character cap on returned content. Falls back to GROK_SEARCH_FETCH_MAX_CHARS, otherwise unlimited."
+                            "description": "Content character cap; omitted uses server configuration (unlimited if unset)."
                         }
                     }
                 }
@@ -378,7 +378,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "doctor",
-                "description": "Diagnostic probe: live connectivity check for the Grok backend and every configured source provider (Tavily / Exa / TinyFish / Firecrawl), plus the effective source chain and masked configuration. Use to verify the server is wired up and reachable.",
+                "description": "Check provider connectivity and report masked configuration.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]
@@ -566,12 +566,12 @@ mod tests {
                 .to_string()
         };
 
-        // web_search: discovery-type cue, explicit no-URL case; must NOT
-        // recommend itself for single-page reads (that's web_fetch's job).
+        // web_search: discovery-type cue, with known-page reads routed to
+        // web_fetch rather than claimed as its own role.
         let web_search = desc("web_search");
         assert!(web_search.contains("discovery"), "web_search: {web_search}");
         assert!(
-            web_search.contains("don't have a specific URL"),
+            web_search.contains("web_fetch"),
             "web_search: {web_search}"
         );
         assert!(
@@ -579,21 +579,14 @@ mod tests {
             "web_search must not claim the single-page-read role: {web_search}"
         );
 
-        // web_fetch: targeted single-page read, names all four special
-        // sources, cross-references web_search.
+        // web_fetch: targeted single-page read, cross-references web_search.
+        // Supported-site details belong in docs, not the compact tool schema.
         let web_fetch = desc("web_fetch");
         assert!(web_fetch.contains("specific URL"), "web_fetch: {web_fetch}");
         assert!(
             web_fetch.contains("read a single page"),
             "web_fetch: {web_fetch}"
         );
-        assert!(web_fetch.contains("GitHub issue"), "web_fetch: {web_fetch}");
-        assert!(
-            web_fetch.contains("StackOverflow") || web_fetch.contains("StackExchange"),
-            "web_fetch: {web_fetch}"
-        );
-        assert!(web_fetch.contains("arXiv"), "web_fetch: {web_fetch}");
-        assert!(web_fetch.contains("Wikipedia"), "web_fetch: {web_fetch}");
         assert!(web_fetch.contains("web_search"), "web_fetch: {web_fetch}");
 
         // get_sources: reuses a prior web_search session, runs no new search.
