@@ -221,3 +221,69 @@ fn inline_citations_dedupe_against_structured_sources() {
     assert!(urls.contains(&"https://openai.com/news"));
     assert!(urls.contains(&"https://openai.com/blog"));
 }
+
+#[test]
+fn parses_search_sources_attached_to_output_item() {
+    // Proxied / OpenAI-compatible Grok gateways return `search_sources` on the
+    // output item itself while `content[].annotations` stays empty.
+    let raw = serde_json::json!({
+        "id": "resp_1",
+        "object": "response",
+        "status": "completed",
+        "model": "grok-4.20-fast",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "🔍 web_search: photo2anime" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    { "type": "output_text", "text": "Here are the projects.", "annotations": [] }
+                ],
+                "search_sources": [
+                    { "url": "https://github.com/TachibanaYoshino/AnimeGANv2", "title": "AnimeGANv2", "type": "web" },
+                    { "url": "https://github.com/williamyang1991/DualStyleGAN", "title": "DualStyleGAN", "type": "web" }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("parsed");
+
+    assert_eq!(parsed.content, "Here are the projects.");
+    let urls: Vec<_> = parsed.sources.iter().map(|s| s.url.as_str()).collect();
+    assert_eq!(urls.len(), 2, "output-item search_sources dropped: {urls:?}");
+    assert!(urls.contains(&"https://github.com/TachibanaYoshino/AnimeGANv2"));
+    assert!(urls.contains(&"https://github.com/williamyang1991/DualStyleGAN"));
+}
+
+#[test]
+fn empty_text_turn_with_search_sources_is_not_a_parse_error() {
+    // Upstream sometimes returns a reasoning-only turn (text_len=0). With the
+    // item-level `search_sources` harvested, this must parse instead of
+    // surfacing `grok_parse_error`.
+    let raw = serde_json::json!({
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "🔍 web_search: news" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "", "annotations": [] }],
+                "search_sources": [
+                    { "url": "https://example.com/a", "title": "A" }
+                ]
+            }
+        ]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("must not be a parse error");
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].url, "https://example.com/a");
+}
