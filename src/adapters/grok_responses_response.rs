@@ -48,6 +48,13 @@ fn collect_output_item(item: &Value, text_parts: &mut Vec<String>, sources: &mut
         }
     }
 
+    // Proxied / OpenAI-compatible Grok gateways attach the sources directly on
+    // the output item as `search_sources`, leaving `content[].annotations`
+    // empty. Without this the whole source list is discarded.
+    if let Some(item_sources) = item.get("search_sources") {
+        collect_sources_from_value(item_sources, sources);
+    }
+
     if let Some(content) = item.get("content").and_then(Value::as_array) {
         for block in content {
             if let Some(text) = block.get("text").and_then(Value::as_str) {
