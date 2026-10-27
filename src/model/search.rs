@@ -64,6 +64,8 @@ pub struct SearchFilters {
     pub recency_days: Option<u32>,
     pub include_domains: Vec<String>,
     pub exclude_domains: Vec<String>,
+    /// Exa-only result category; see `ProviderSpec::supports_category`.
+    pub category: Option<String>,
 }
 
 impl SearchFilters {
@@ -71,5 +73,6 @@ impl SearchFilters {
         self.recency_days.is_none()
             && self.include_domains.is_empty()
             && self.exclude_domains.is_empty()
+            && self.category.is_none()
     }
 }

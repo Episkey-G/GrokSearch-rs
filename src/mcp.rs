@@ -1,5 +1,6 @@
 use crate::error::{GrokSearchError, Result};
 use crate::model::tool::WebSearchInput;
+use crate::providers::exa::CATEGORIES as EXA_CATEGORIES;
 use crate::service::SearchService;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -191,38 +192,7 @@ async fn call_tool(service: &SearchService, name: &str, args: Value) -> Result<V
     match name {
         "doctor" => Ok(service.doctor().await),
         "web_search" => {
-            let query = args.get("query").and_then(Value::as_str).ok_or_else(|| {
-                GrokSearchError::InvalidParams("web_search.query is required".into())
-            })?;
-            let input = WebSearchInput {
-                query: query.to_string(),
-                // model/platform are intentionally NOT read from tool input: the
-                // calling client's LLM must not choose the Grok model or focus
-                // platform (issue #15) — it hallucinates names like `grok-4` that
-                // override the operator's configured model. The model is fixed by
-                // config (GROK_SEARCH_MODEL) or the per-request X-Grok-Model
-                // header; leaving these None routes through the default in
-                // build_search_request.
-                platform: None,
-                model: None,
-                extra_sources: args
-                    .get("extra_sources")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as usize),
-                recency_days: args
-                    .get("recency_days")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u32)
-                    .filter(|value| *value > 0),
-                include_domains: parse_string_array(args.get("include_domains")),
-                exclude_domains: parse_string_array(args.get("exclude_domains")),
-                include_content: args.get("include_content").and_then(Value::as_bool),
-                response_format: args
-                    .get("response_format")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-            let output = service.web_search(input).await?;
+            let output = service.web_search(parse_web_search_input(&args)?).await?;
             Ok(serde_json::to_value(output)
                 .map_err(|err| GrokSearchError::Parse(format!("serialize output: {err}")))?)
         }
@@ -313,6 +283,11 @@ fn tools_list() -> Value {
                             "items": { "type": "string" },
                             "description": "Suppress supplemental results from these domains. Tavily/Exa/TinyFish honor strictly via native domain parameters; filter-blind providers are skipped. Grok receives as soft instruction."
                         },
+                        "category": {
+                            "type": "string",
+                            "enum": EXA_CATEGORIES,
+                            "description": "Restrict supplemental results to one Exa result category, e.g. \"publication\" for research papers (arXiv, journals, proceedings). Only Exa honors it: every other provider is skipped for a categorized request, so supplemental sources come from Exa or not at all. \"publication\" also asks Grok to prefer peer-reviewed papers and arXiv preprints."
+                        },
                         "include_content": {
                             "type": "boolean",
                             "default": true,
@@ -382,6 +357,47 @@ fn tools_list() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]
+    })
+}
+
+fn parse_web_search_input(args: &Value) -> Result<WebSearchInput> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GrokSearchError::InvalidParams("web_search.query is required".into()))?;
+    Ok(WebSearchInput {
+        query: query.to_string(),
+        // model/platform are intentionally NOT read from tool input: the
+        // calling client's LLM must not choose the Grok model or focus
+        // platform (issue #15) — it hallucinates names like `grok-4` that
+        // override the operator's configured model. The model is fixed by
+        // config (GROK_SEARCH_MODEL) or the per-request X-Grok-Model
+        // header; leaving these None routes through the default in
+        // build_search_request.
+        platform: None,
+        model: None,
+        extra_sources: args
+            .get("extra_sources")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize),
+        recency_days: args
+            .get("recency_days")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .filter(|value| *value > 0),
+        include_domains: parse_string_array(args.get("include_domains")),
+        exclude_domains: parse_string_array(args.get("exclude_domains")),
+        category: args
+            .get("category")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        include_content: args.get("include_content").and_then(Value::as_bool),
+        response_format: args
+            .get("response_format")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -638,6 +654,43 @@ mod tests {
             props.contains_key("response_format"),
             "response_format must remain: {props:?}"
         );
+    }
+
+    #[test]
+    fn web_search_input_parses_category() {
+        let input = parse_web_search_input(&json!({
+            "query": "KV cache compression",
+            "category": " publication "
+        }))
+        .expect("valid input");
+        assert_eq!(input.category.as_deref(), Some("publication"));
+
+        // Absent or blank means "no category" — the uncategorized path.
+        for args in [
+            json!({ "query": "q" }),
+            json!({ "query": "q", "category": "  " }),
+        ] {
+            let input = parse_web_search_input(&args).expect("valid input");
+            assert_eq!(input.category, None, "{args}");
+        }
+    }
+
+    #[test]
+    fn web_search_schema_offers_exa_categories() {
+        let listed = tools_list();
+        let web_search = listed["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|t| t["name"] == "web_search")
+            .expect("web_search tool present");
+        let category = &web_search["inputSchema"]["properties"]["category"];
+        assert_eq!(category["type"], "string");
+        assert_eq!(category["enum"], json!(EXA_CATEGORIES));
+        assert!(category["enum"]
+            .as_array()
+            .expect("enum array")
+            .contains(&json!("publication")));
     }
 
     /// Drive the serve loop over in-memory buffers instead of process stdio,

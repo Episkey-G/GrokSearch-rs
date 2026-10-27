@@ -16,7 +16,7 @@
 - 🔀 **Two transports** — native xAI Responses (`/v1/responses`) **or** any OpenAI‑compatible chat‑completions gateway (`/v1/chat/completions`). Pick by env vars; no flag.
 - 🔐 **Optional Grok OAuth mode** — `login/status/logout` commands store a local xAI OAuth token for Responses auth, so the MCP server can run without `GROK_SEARCH_API_KEY`.
 - 🌐 **Optional remote mode** — build with `--features http` to serve the same tools over **Streamable HTTP** (multi‑tenant, bring‑your‑own‑key via request headers) for mobile / multi‑device access. See [self-hosting](#self-hosting-remote-http).
-- 📥 **Pluggable source chain** — supplemental sources and generic fetch walk an ordered provider chain: **Tavily** (RAG‑tuned search + extract + map), **Exa** (semantic search, native domain/date filters), **TinyFish** (free search + JS‑rendering fetch), **Firecrawl** (robust scrape fallback). First provider with results wins; `GROK_SEARCH_SOURCE_PROVIDERS` reorders. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
+- 📥 **Pluggable source chain** — supplemental sources and generic fetch walk an ordered provider chain: **Tavily** (RAG‑tuned search + extract + map), **Exa** (semantic search, native domain/date filters, `category` such as `publication` for paper‑only results), **TinyFish** (free search + JS‑rendering fetch), **Firecrawl** (robust scrape fallback). First provider with results wins; `GROK_SEARCH_SOURCE_PROVIDERS` reorders. `TAVILY_API_KEY` accepts a comma‑separated key list — keys rotate round‑robin with automatic failover on rate/quota errors.
 - 🐦 **Optional X/Twitter search** via `x_search` (Responses transport only).
 - 🚦 **Concurrent stdio requests** — up to 8 tool calls are handled at once; anything beyond that queues rather than being refused. Responses come back in completion order, paired to requests by JSON‑RPC `id`.
 - 🩺 **`doctor`** — connectivity probe + redacted config in one tool call, including whether your config file was found, loaded, or rejected (and why).
@@ -236,7 +236,7 @@ Tired of duplicating `env` blocks across clients? Run `grok-search-rs --init` on
 
 | Tool | When to call it |
 |---|---|
-| `web_search` | Sourced summary for a topic. Sources cached for follow‑up. `response_format: "concise"` returns answer + metadata only; `"detailed"` inlines source text within the response budget. |
+| `web_search` | Sourced summary for a topic. Sources cached for follow‑up. `response_format: "concise"` returns answer + metadata only; `"detailed"` inlines source text within the response budget. `category` (e.g. `"publication"`) restricts supplemental sources to one Exa result category — only Exa serves categorized requests. |
 | `get_sources` | Re‑fetch sources of a previous `web_search` by `session_id`. Supports `offset` / `limit` pagination for large source sets. |
 | `web_fetch` | Page content as clean Markdown. Key‑free specialist extractors for GitHub / StackExchange / arXiv / Wikipedia; every other URL goes through the source chain, which needs at least one provider key. Returns `source_type` + `fallback_reason`. |
 | `web_map` | Discover URLs on a domain via Tavily Map. |

@@ -52,6 +52,7 @@ fn domain_filters_use_dedicated_params_and_leave_the_query_untouched() {
         recency_days: None,
         include_domains: vec!["docs.rs".to_string(), "crates.io".to_string()],
         exclude_domains: vec!["pinterest.com".to_string()],
+        category: None,
     };
     let params = tinyfish_search_params("rust http client", &filters);
     assert_eq!(
@@ -72,6 +73,7 @@ fn operator_like_query_text_is_not_rewritten() {
         recency_days: None,
         include_domains: vec!["github.com".to_string()],
         exclude_domains: Vec::new(),
+        category: None,
     };
     let params = tinyfish_search_params("rust OR go site:example.com", &filters);
     assert_eq!(
@@ -87,6 +89,7 @@ fn recency_days_map_to_minutes_with_ten_year_cap() {
         recency_days: Some(7),
         include_domains: Vec::new(),
         exclude_domains: Vec::new(),
+        category: None,
     };
     let params = tinyfish_search_params("q", &week);
     assert_eq!(params[1], ("recency_minutes", (7 * 24 * 60).to_string()));
@@ -95,6 +98,7 @@ fn recency_days_map_to_minutes_with_ten_year_cap() {
         recency_days: Some(4_000_000),
         include_domains: Vec::new(),
         exclude_domains: Vec::new(),
+        category: None,
     };
     let params = tinyfish_search_params("q", &huge);
     assert_eq!(params[1], ("recency_minutes", "5256000".to_string()));

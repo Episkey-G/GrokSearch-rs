@@ -3,7 +3,8 @@
 //! Exa is an embeddings-first engine: strong on descriptive queries, papers,
 //! official domains, and low-noise discovery, with native support for the
 //! whole `SearchFilters` contract (domain include/exclude lists and a
-//! published-date lower bound). Fetch goes through `/contents`.
+//! published-date lower bound) plus the Exa-only result `category`. Fetch
+//! goes through `/contents`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,20 @@ const AUTH_HEADER: &str = "x-api-key";
 
 /// Exa's public `numResults` ceiling.
 const MAX_NUM_RESULTS: usize = 100;
+
+/// Values Exa's `/search` accepts for `category`, mirroring the official
+/// exa-mcp-server. `"research paper"` is an older alias that returns the same
+/// results as `"publication"`, so it is not offered separately.
+pub const CATEGORIES: [&str; 8] = [
+    "company",
+    "publication",
+    "news",
+    "pdf",
+    "github",
+    "personal site",
+    "people",
+    "financial report",
+];
 
 #[derive(Clone)]
 pub struct ExaProvider {
@@ -117,6 +132,9 @@ pub fn exa_search_request_body(
             "startPublishedDate".into(),
             json!(start_published_date(days, now_unix)),
         );
+    }
+    if let Some(category) = &filters.category {
+        object.insert("category".into(), json!(category));
     }
     body
 }

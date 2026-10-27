@@ -14,6 +14,9 @@ pub struct WebSearchInput {
     pub include_domains: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_domains: Vec<String>,
+    /// Exa result category (`"publication"`, `"news"`, …). Only Exa can
+    /// honor it, so a categorized request is served by Exa or by nothing.
+    pub category: Option<String>,
     pub include_content: Option<bool>,
     /// `"concise"` (answer + source metadata only) or `"detailed"` (inline
     /// content, subject to the response budget). When set, takes precedence

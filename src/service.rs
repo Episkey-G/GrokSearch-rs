@@ -13,7 +13,7 @@ use crate::model::search::{
 };
 use crate::model::source::{is_junk_title, merge_sources, FetchedPage, Source};
 use crate::model::tool::{GetSourcesOutput, WebFetchOutput, WebSearchInput, WebSearchOutput};
-use crate::providers::exa::ExaProvider;
+use crate::providers::exa::{ExaProvider, CATEGORIES as EXA_CATEGORIES};
 use crate::providers::firecrawl::FirecrawlProvider;
 use crate::providers::grok::GrokResponsesProvider;
 use crate::providers::tavily::TavilyProvider;
@@ -151,6 +151,10 @@ pub(crate) struct ProviderSpec {
     /// include/exclude). Providers that cannot are *skipped* for filtered
     /// requests instead of silently violating the filter contract.
     supports_filters: bool,
+    /// Whether the provider honors `SearchFilters::category`. Only Exa has a
+    /// result-category filter; everyone else is skipped for categorized
+    /// requests, so a paper-only search never falls back to general web hits.
+    supports_category: bool,
     /// Whether the provider exposes a real site-map endpoint (`web_map`).
     supports_map: bool,
     /// Core providers appear in zero-source diagnostics even when
@@ -167,6 +171,7 @@ const TAVILY_SPEC: ProviderSpec = ProviderSpec {
     key_var: "TAVILY_API_KEY",
     header: "x-tavily-api-key",
     supports_filters: true,
+    supports_category: false,
     supports_map: true,
     core: true,
 };
@@ -178,6 +183,7 @@ const EXA_SPEC: ProviderSpec = ProviderSpec {
     key_var: "EXA_API_KEY",
     header: "x-exa-api-key",
     supports_filters: true,
+    supports_category: true,
     supports_map: false,
     core: false,
 };
@@ -189,6 +195,7 @@ const TINYFISH_SPEC: ProviderSpec = ProviderSpec {
     key_var: "TINYFISH_API_KEY",
     header: "x-tinyfish-api-key",
     supports_filters: true,
+    supports_category: false,
     supports_map: false,
     core: false,
 };
@@ -200,6 +207,7 @@ const FIRECRAWL_SPEC: ProviderSpec = ProviderSpec {
     key_var: "FIRECRAWL_API_KEY",
     header: "x-firecrawl-api-key",
     supports_filters: false,
+    supports_category: false,
     supports_map: false,
     core: true,
 };
@@ -751,6 +759,18 @@ impl SearchService {
         };
         let include_content =
             format_include_content.unwrap_or_else(|| input.include_content.unwrap_or(true));
+        if let Some(category) = input.category.as_deref() {
+            if !EXA_CATEGORIES.contains(&category) {
+                return Err(GrokSearchError::InvalidParams(format!(
+                    "category must be one of {}, got \"{category}\"",
+                    EXA_CATEGORIES
+                        .iter()
+                        .map(|value| format!("\"{value}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
 
         let mut uuid_buf = [0u8; uuid::fmt::Simple::LENGTH];
         let session_id = {
@@ -765,6 +785,7 @@ impl SearchService {
             recency_days: input.recency_days,
             include_domains: input.include_domains.clone(),
             exclude_domains: input.exclude_domains.clone(),
+            category: input.category.clone(),
         };
 
         // Speculative fan-out: fetch enough sources to satisfy whichever path
@@ -807,6 +828,9 @@ impl SearchService {
                 .await;
         }
 
+        if let Some(line) = category_enrichment_gap(&filters, &raw, effective_extra_sources) {
+            eprintln!("{line}");
+        }
         let mut enrichment = raw.sources;
         enrichment.truncate(effective_extra_sources);
         let enrichment = with_provider(enrichment, enrichment_label(raw.origin));
@@ -890,14 +914,14 @@ impl SearchService {
             match slot {
                 SourceSlot::Active(entry) => {
                     let name = entry.spec.name;
-                    // A provider that ignores `SearchFilters` (Firecrawl) must
-                    // never serve a filter-constrained request: swapping
+                    // A provider that ignores part of `SearchFilters` must
+                    // never serve a request constrained by that part: swapping
                     // constrained results for unconstrained ones would
-                    // silently violate the include/exclude/recency contract.
-                    // Filtered requests are filter-capable-providers-or-nothing.
-                    if !filters.is_empty() && !entry.spec.supports_filters {
+                    // silently violate the include/exclude/recency/category
+                    // contract. Filtered requests are capable-providers-or-nothing.
+                    if let Some(reason) = filter_skip_reason(entry.spec, filters) {
                         notes.push(SourceNote::no_results(format!(
-                            "{name}: skipped (request carries domain/recency filters, which {name} cannot honor)"
+                            "{name}: skipped ({reason})"
                         )));
                         continue;
                     }
@@ -945,27 +969,66 @@ impl SearchService {
                         spec.key_var,
                         spec.header,
                     );
-                    // For a filter-blind provider, whether the gate is the
+                    // For a provider the filter gate skips, whether the gate is the
                     // *only* thing in the way decides what to advise. A
                     // configured Firecrawl really would have answered, so
                     // dropping the filters is a genuine remedy; an absent one
                     // changes nothing when the filters go, so the note names
                     // both problems instead of hiding the config one.
-                    notes.push(if !filters.is_empty() && !spec.supports_filters {
-                        SourceNote::new(
+                    notes.push(match filter_skip_reason(spec, filters) {
+                        Some(reason) => SourceNote::new(
                             unavailable.kind,
-                            format!(
-                                "{} — also skipped (request carries domain/recency filters, which {} cannot honor)",
-                                unavailable.detail, spec.name
-                            ),
-                        )
-                    } else {
-                        unavailable
+                            format!("{} — also skipped ({reason})", unavailable.detail),
+                        ),
+                        None => unavailable,
                     });
                 }
             }
         }
+        if let Some(category) = filters.category.as_deref() {
+            notes.extend(self.absent_category_provider_notes(category));
+        }
         RawSources::empty(notes)
+    }
+
+    /// Notes for category-capable providers the chain holds no slot for at
+    /// all. The walk above only speaks for slotted providers, and an
+    /// unconfigured Exa has no slot in the default chain (it is optional), so
+    /// without this a categorized request would list every skip yet never name
+    /// the one provider that could have served it.
+    fn absent_category_provider_notes(&self, category: &str) -> Vec<SourceNote> {
+        let slotted = self.source_slots.iter().any(|slot| match slot {
+            SourceSlot::Active(entry) => entry.spec.supports_category,
+            SourceSlot::Missing { spec, .. } => spec.supports_category,
+        });
+        if slotted {
+            return Vec::new();
+        }
+        CANONICAL_SOURCE_ORDER
+            .iter()
+            .filter(|spec| spec.supports_category)
+            .map(|spec| {
+                let only = format!("the only provider that can honor category={category}");
+                // Default chain: absent means unconfigured, so the missing-key
+                // or disabled account applies. Explicit chain: the operator
+                // left it out, and no key can help until it is listed.
+                if self.config.source_providers.is_empty() {
+                    let unavailable = unavailable_note(
+                        spec.name,
+                        provider_enabled(spec, &self.config),
+                        spec.enable_var,
+                        spec.key_var,
+                        spec.header,
+                    );
+                    SourceNote::new(unavailable.kind, format!("{} — {only}", unavailable.detail))
+                } else {
+                    SourceNote::broken(format!(
+                        "{}: not listed in GROK_SEARCH_SOURCE_PROVIDERS — {only}",
+                        spec.name
+                    ))
+                }
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1401,6 +1464,9 @@ impl SearchService {
             content.push_str("\n\nDo not cite sources from: ");
             content.push_str(&input.exclude_domains.join(", "));
         }
+        if input.category.as_deref() == Some("publication") {
+            content.push_str("\n\nPrefer citing peer-reviewed papers and arXiv preprints.");
+        }
         if !extra_sources.is_empty() {
             content.push_str("\n\nAdditional sources:\n");
             for source in extra_sources {
@@ -1477,8 +1543,9 @@ enum NoteKind {
     /// The operator switched this path off — a disabled provider, or a source
     /// budget of zero. Nothing is broken; the configuration says no.
     Config,
-    /// A missing credential or an upstream failure. Something has to be fixed
-    /// before this path can work at all.
+    /// A missing credential, an upstream failure, or a provider the request
+    /// needs left out of the chain. Something has to be fixed before this path
+    /// can work at all.
     Broken,
 }
 
@@ -1609,6 +1676,46 @@ fn fallback_remediation(notes: &[SourceNote]) -> String {
         parts.push("Repeating this query unchanged will fail the same way until the condition above clears.");
     }
     parts.join(" ")
+}
+
+/// stderr account of a categorized request that got no supplemental sources
+/// although Grok answered. On that path the chain's notes otherwise go
+/// nowhere, and "Exa found nothing" versus "Exa is not configured" is exactly
+/// what the operator needs to tell apart. Uncategorized requests stay silent,
+/// as before.
+fn category_enrichment_gap(
+    filters: &SearchFilters,
+    raw: &RawSources,
+    extra_sources: usize,
+) -> Option<String> {
+    let category = filters.category.as_deref()?;
+    if extra_sources == 0 || !raw.sources.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "grok-search-rs: no supplemental sources for category={category} ({})",
+        source_diagnosis(&raw.notes)
+    ))
+}
+
+/// Why `spec` must sit out a request carrying `filters`, or `None` when it can
+/// serve it. Category is checked first: it is the narrower capability (Exa
+/// only), so naming it is the more useful account when both gates apply.
+fn filter_skip_reason(spec: &ProviderSpec, filters: &SearchFilters) -> Option<String> {
+    let name = spec.name;
+    if let Some(category) = &filters.category {
+        if !spec.supports_category {
+            return Some(format!(
+                "request carries category={category}, which {name} cannot honor"
+            ));
+        }
+    }
+    if !filters.is_empty() && !spec.supports_filters {
+        return Some(format!(
+            "request carries domain/recency filters, which {name} cannot honor"
+        ));
+    }
+    None
 }
 
 /// Why a source provider is absent from the service: the operator switched it
@@ -2100,6 +2207,283 @@ mod chain_tests {
                 .map(|source| source.provider.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Records the category each search was asked to honor.
+    #[derive(Clone, Default)]
+    struct CategoryRecorder(Arc<std::sync::Mutex<Vec<Option<String>>>>);
+    #[async_trait]
+    impl SourceProvider for CategoryRecorder {
+        async fn search_sources(
+            &self,
+            _query: &str,
+            max_results: usize,
+            filters: &SearchFilters,
+        ) -> Result<Vec<Source>> {
+            self.0.lock().unwrap().push(filters.category.clone());
+            Ok((0..max_results)
+                .map(|idx| Source::new(format!("https://arxiv.org/abs/2401.{idx:05}"), "exa"))
+                .collect())
+        }
+        async fn fetch(&self, _url: &str) -> Result<FetchedPage> {
+            Ok(FetchedPage::text("paper"))
+        }
+        async fn map(&self, _url: &str, _max_results: usize) -> Result<Vec<Source>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn publication_input() -> WebSearchInput {
+        WebSearchInput {
+            category: Some("publication".to_string()),
+            ..concise_input()
+        }
+    }
+
+    fn provider_labels(out: &WebSearchOutput) -> Vec<String> {
+        out.sources
+            .iter()
+            .map(|source| source.provider.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn categorized_requests_skip_every_provider_but_exa() {
+        // Every category-blind provider sits ahead of Exa and would answer;
+        // all must be skipped, and Exa must receive the category.
+        let exa = CategoryRecorder::default();
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tavily")),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &TINYFISH_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tinyfish")),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &FIRECRAWL_SPEC,
+                    provider: Arc::new(NamedSourceProvider("firecrawl")),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &EXA_SPEC,
+                    provider: Arc::new(exa.clone()),
+                }),
+            ],
+            Arc::new(FakeAiProvider),
+        );
+        let out = svc
+            .web_search(publication_input())
+            .await
+            .expect("search output");
+        let labels = provider_labels(&out);
+        assert!(
+            labels.iter().any(|label| label == "exa_enrichment"),
+            "{labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .all(|label| label == "exa_enrichment" || label == "grok_responses"),
+            "category-blind providers must not serve a categorized request: {labels:?}"
+        );
+        assert_eq!(
+            *exa.0.lock().unwrap(),
+            vec![Some("publication".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn categorized_request_without_exa_adds_no_supplemental_sources() {
+        // Grok answers; the only configured providers cannot honor the
+        // category, so enrichment stays empty rather than mixing in general
+        // web hits.
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tavily")),
+                }),
+                SourceSlot::Active(SourceEntry {
+                    spec: &TINYFISH_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tinyfish")),
+                }),
+            ],
+            Arc::new(FakeAiProvider),
+        );
+        let out = svc
+            .web_search(publication_input())
+            .await
+            .expect("search output");
+        assert!(!out.fallback_used);
+        let labels = provider_labels(&out);
+        assert!(
+            labels.iter().all(|label| label == "grok_responses"),
+            "{labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn categorized_fallback_without_exa_explains_every_skip() {
+        let svc = chain_service(
+            vec![
+                SourceSlot::Active(SourceEntry {
+                    spec: &TAVILY_SPEC,
+                    provider: Arc::new(NamedSourceProvider("tavily")),
+                }),
+                SourceSlot::Missing {
+                    spec: &EXA_SPEC,
+                    enabled: true,
+                },
+                SourceSlot::Missing {
+                    spec: &FIRECRAWL_SPEC,
+                    enabled: true,
+                },
+            ],
+            Arc::new(ErrAiProvider),
+        );
+        let err = svc
+            .web_search(publication_input())
+            .await
+            .expect_err("no provider can honor the category");
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "tavily: skipped (request carries category=publication, which tavily cannot honor)"
+            ),
+            "{message}"
+        );
+        // Exa is the one provider that could have served it, so its note is
+        // the plain missing-key account with no skip appended.
+        assert!(
+            message.contains("exa: no API key (EXA_API_KEY for stdio, x-exa-api-key header for the HTTP transport);"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "— also skipped (request carries category=publication, which firecrawl cannot honor)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn categorized_fallback_names_exa_when_the_default_chain_omits_it() {
+        // Default chain without an Exa key: Exa is optional, so it holds no
+        // slot, yet it is the provider the caller needs to configure.
+        let svc = chain_service(
+            vec![SourceSlot::Active(SourceEntry {
+                spec: &TAVILY_SPEC,
+                provider: Arc::new(NamedSourceProvider("tavily")),
+            })],
+            Arc::new(ErrAiProvider),
+        );
+        let message = svc
+            .web_search(publication_input())
+            .await
+            .expect_err("no provider can honor the category")
+            .to_string();
+        assert!(
+            message.contains(
+                "exa: no API key (EXA_API_KEY for stdio, x-exa-api-key header for the HTTP transport) — the only provider that can honor category=publication"
+            ),
+            "{message}"
+        );
+
+        // Uncategorized requests never hear about the optional provider.
+        let svc = chain_service(
+            vec![SourceSlot::Missing {
+                spec: &FIRECRAWL_SPEC,
+                enabled: true,
+            }],
+            Arc::new(ErrAiProvider),
+        );
+        let message = svc
+            .web_search(concise_input())
+            .await
+            .expect_err("empty chain")
+            .to_string();
+        assert!(!message.contains("exa"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn categorized_fallback_names_exa_when_the_explicit_chain_leaves_it_out() {
+        let mut svc = chain_service(
+            vec![SourceSlot::Active(SourceEntry {
+                spec: &TAVILY_SPEC,
+                provider: Arc::new(NamedSourceProvider("tavily")),
+            })],
+            Arc::new(ErrAiProvider),
+        );
+        svc.config = Config::from_env_map([
+            ("GROK_SEARCH_API_KEY", "fake"),
+            ("GROK_SEARCH_SOURCE_PROVIDERS", "tavily"),
+        ]);
+        let message = svc
+            .web_search(publication_input())
+            .await
+            .expect_err("no provider can honor the category")
+            .to_string();
+        assert!(
+            message.contains(
+                "exa: not listed in GROK_SEARCH_SOURCE_PROVIDERS — the only provider that can honor category=publication"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn empty_categorized_enrichment_is_logged_with_its_reason() {
+        let categorized = SearchFilters {
+            category: Some("publication".to_string()),
+            ..Default::default()
+        };
+        let empty = RawSources::empty(vec![SourceNote::no_results("exa: no results")]);
+        assert_eq!(
+            category_enrichment_gap(&categorized, &empty, 3).as_deref(),
+            Some("grok-search-rs: no supplemental sources for category=publication (exa: no results)")
+        );
+        // Silent when sources arrived, when none were asked for, and for
+        // uncategorized requests.
+        let found = RawSources::found(
+            vec![Source::new("https://arxiv.org/abs/2401.00001", "exa")],
+            Some("exa"),
+        );
+        assert_eq!(category_enrichment_gap(&categorized, &found, 3), None);
+        assert_eq!(category_enrichment_gap(&categorized, &empty, 0), None);
+        assert_eq!(
+            category_enrichment_gap(&SearchFilters::default(), &empty, 3),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_category_is_rejected() {
+        let svc = chain_service(Vec::new(), Arc::new(FakeAiProvider));
+        let mut input = concise_input();
+        input.category = Some("research paper".to_string());
+        let err = svc.web_search(input).await.expect_err("invalid category");
+        assert!(matches!(err, GrokSearchError::InvalidParams(_)), "{err:?}");
+        assert!(err.to_string().contains("\"publication\""), "{err}");
+    }
+
+    #[test]
+    fn publication_category_asks_grok_for_papers() {
+        let svc = chain_service(Vec::new(), Arc::new(FakeAiProvider));
+        let prompt = |input: &WebSearchInput| {
+            svc.build_search_request(input, &[]).messages[0].content[0]
+                .as_text()
+                .to_string()
+        };
+        const HINT: &str = "Prefer citing peer-reviewed papers and arXiv preprints.";
+        assert!(prompt(&publication_input()).contains(HINT));
+        assert!(!prompt(&concise_input()).contains(HINT));
+        let news = WebSearchInput {
+            category: Some("news".to_string()),
+            ..concise_input()
+        };
+        assert!(!prompt(&news).contains(HINT));
     }
 }
 

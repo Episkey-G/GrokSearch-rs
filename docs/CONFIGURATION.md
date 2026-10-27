@@ -167,9 +167,11 @@ Semantic (embeddings-first) search with native `includeDomains` / `excludeDomain
 | `EXA_API_URL` | `https://api.exa.ai` | Exa API base URL. |
 | `EXA_ENABLED` | `true` | Optional override. Set to `false` to disable Exa even if a key is configured. |
 
+`web_search`'s `category` parameter maps to Exa's `category` field: `company`, `publication`, `news`, `pdf`, `github`, `personal site`, `people`, or `financial report`. `publication` returns research papers (arXiv, journals, proceedings) and also asks Grok to prefer peer-reviewed papers and arXiv preprints. Exa is the only provider with a category filter, so a categorized request needs `EXA_API_KEY`; without it the request gets no supplemental sources. The reason (Exa missing, failing, or empty, plus every skipped provider) is named in the zero-source error when Grok also fails, and in a `no supplemental sources for category=…` stderr line when Grok still answers.
+
 ## Source chain
 
-Supplemental sources and generic (non-specialist) fetch walk an ordered provider chain; the first provider with usable output wins and later ones are pure fallback. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests. The whole chain shares one request deadline (`GROK_SEARCH_TIMEOUT_SECONDS`) — a slow provider cannot multiply the budget by the chain length.
+Supplemental sources and generic (non-specialist) fetch walk an ordered provider chain; the first provider with usable output wins and later ones are pure fallback. Providers that cannot honor domain/recency filters (Firecrawl) are skipped for filtered requests, and every provider except Exa is skipped for requests carrying `category` — a categorized request is served by Exa or gets no supplemental sources, never unfiltered results from another provider. The whole chain shares one request deadline (`GROK_SEARCH_TIMEOUT_SECONDS`) — a slow provider cannot multiply the budget by the chain length.
 
 `web_map` is a separate capability, not part of this chain: it always uses Tavily whenever `TAVILY_API_KEY` is configured, even when the chain excludes Tavily.
 

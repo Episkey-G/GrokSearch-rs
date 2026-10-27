@@ -100,6 +100,7 @@ fn tavily_search_body_serializes_filters() {
         recency_days: Some(3),
         include_domains: vec!["github.com".to_string(), "news.ycombinator.com".to_string()],
         exclude_domains: vec!["example.com".to_string()],
+        category: None,
     };
 
     let body = tavily_search_request_body("today AI", 5, &filters);

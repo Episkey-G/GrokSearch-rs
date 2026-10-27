@@ -35,6 +35,7 @@ async fn full_service_web_search_via_chat_completions() {
             recency_days: None,
             include_domains: vec![],
             exclude_domains: vec![],
+            category: None,
             extra_sources: None,
             model: None,
             include_content: None,

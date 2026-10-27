@@ -10,6 +10,7 @@ fn search_body_carries_native_domain_and_date_filters() {
         recency_days: Some(30),
         include_domains: vec!["arxiv.org".to_string()],
         exclude_domains: vec!["reddit.com".to_string()],
+        category: None,
     };
     // 2026-08-02T00:00:00Z = 1785628800; 30 days earlier is 2026-07-03.
     let body = exa_search_request_body("LLM eval papers", 5, &filters, 1_785_628_800);
@@ -27,9 +28,22 @@ fn search_body_omits_absent_filters_and_clamps_num_results() {
     assert!(body.get("includeDomains").is_none());
     assert!(body.get("excludeDomains").is_none());
     assert!(body.get("startPublishedDate").is_none());
+    assert!(body.get("category").is_none());
 
     let body = exa_search_request_body("q", 500, &SearchFilters::default(), 1_785_628_800);
     assert_eq!(body["numResults"], 100);
+}
+
+#[test]
+fn search_body_carries_category_beside_other_filters() {
+    let filters = SearchFilters {
+        include_domains: vec!["arxiv.org".to_string()],
+        category: Some("publication".to_string()),
+        ..Default::default()
+    };
+    let body = exa_search_request_body("KV cache compression", 5, &filters, 1_785_628_800);
+    assert_eq!(body["category"], "publication");
+    assert_eq!(body["includeDomains"], json!(["arxiv.org"]));
 }
 
 #[test]
